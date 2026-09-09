@@ -9,8 +9,13 @@ on:
       - 'depot/*.PDF'
       - 'depot/**/*.pdf'
       - 'depot/**/*.PDF'
+      - 'src/mems_forge/ocr_reader.py'
+      - 'src/mems_forge/ocr_layout.py'
+      - 'src/mems_forge/structure_candidates.py'
       - 'src/mems_forge/full_document_audit.py'
       - 'tools/full_document_audit.py'
+      - 'tests/test_ocr_reader.py'
+      - 'tests/test_structure_candidates.py'
       - 'tests/test_full_document_audit.py'
       - '.github/workflows/full-document-audit.yml'
   workflow_dispatch:
