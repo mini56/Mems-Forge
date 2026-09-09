@@ -13,6 +13,7 @@ on:
       - 'tools/depot_intake.py'
       - 'tools/process_depot.py'
       - 'tools/ocr_prototype.py'
+      - 'tools/layout_prototype.py'
       - 'tests/**'
       - 'pyproject.toml'
       - '.github/workflows/pdf-intake.yml'
@@ -64,7 +65,10 @@ jobs:
       - name: Run controlled OCR prototype
         run: python tools/ocr_prototype.py
 
-      - name: Upload intake, raw-reader audit and OCR prototype
+      - name: Reconstruct candidate OCR layout
+        run: python tools/layout_prototype.py
+
+      - name: Upload intake, reader, OCR and layout audits
         uses: actions/upload-artifact@v4
         with:
           name: mems-forge-pdf-reader-${{ github.run_id }}
@@ -72,5 +76,6 @@ jobs:
             out/intake/
             out/reader/
             out/ocr-prototype/
+            out/layout-prototype/
           if-no-files-found: error
           compression-level: 6
