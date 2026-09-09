@@ -1,0 +1,67 @@
+name: MEMS Forge — Full document audit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'depot/*.pdf'
+      - 'depot/*.PDF'
+      - 'depot/**/*.pdf'
+      - 'depot/**/*.PDF'
+      - 'src/mems_forge/full_document_audit.py'
+      - 'tools/full_document_audit.py'
+      - 'tests/test_full_document_audit.py'
+      - '.github/workflows/full-document-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-audit:
+    name: Audit complete deposited PDF
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository with Git LFS files
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install OCR engine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          tesseract --version
+
+      - name: Install MEMS Forge
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
+      - name: Run all guardrail tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build immutable source intake manifest
+        run: python tools/depot_intake.py
+
+      - name: Run full 482-page extraction audit
+        run: python tools/full_document_audit.py
+
+      - name: Upload complete audit artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-full-audit-${{ github.run_id }}
+          path: |
+            out/intake/
+            out/full-audit/
+          if-no-files-found: error
+          compression-level: 6
