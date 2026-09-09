@@ -6,24 +6,25 @@ import re
 from collections import defaultdict
 from typing import Any
 
-STRUCTURE_VERSION = "0.1.1"
+STRUCTURE_VERSION = "0.2.0"
 
 REPAIR_NO_RE = re.compile(r"\bService\s+Repair\s+No\.?\s*([0-9]+(?:\.[0-9]+){1,4})\b", re.IGNORECASE)
 STEP_RE = re.compile(r"^\s*(\d{1,3})\.\s*(.*)$")
 BULLET_RE = re.compile(r"^\s*(?:[•●▪◦*-]|[eo]\s+)\s*(.*)$", re.IGNORECASE)
 
-# A phase word alone is never enough to create a procedure. It is only accepted
-# after a Service Repair number has already established strong procedure context.
+# Only exact source forms are accepted here. OCR-looking misspellings such as
+# "dismantie" are deliberately NOT normalised silently: they remain review data.
 PHASE_LABELS = {
-    "remove",
-    "refit",
-    "dismantle",
-    "reassemble",
-    "adjust",
-    "adjustment",
-    "check",
-    "inspection",
-    "overhaul",
+    "remove": "remove",
+    "refit": "refit",
+    "refitting": "refit",  # exact manufacturer heading observed in AKM7169
+    "dismantle": "dismantle",
+    "reassemble": "reassemble",
+    "adjust": "adjust",
+    "adjustment": "adjustment",
+    "check": "check",
+    "inspection": "inspection",
+    "overhaul": "overhaul",
 }
 
 
@@ -49,9 +50,12 @@ def _looks_like_title(text: str) -> bool:
     return True
 
 
-def _phase_label(text: str) -> str | None:
-    value = _normalise_space(text).strip(" :.-").lower()
-    return value if value in PHASE_LABELS else None
+def _phase_label(text: str) -> tuple[str, str] | None:
+    source_form = _normalise_space(text).strip(" :.-").lower()
+    canonical = PHASE_LABELS.get(source_form)
+    if canonical is None:
+        return None
+    return canonical, source_form
 
 
 def _line_ref(line: dict[str, Any]) -> dict[str, Any]:
@@ -81,6 +85,12 @@ def _sequence_status(numbers: list[int]) -> str:
         return "single_step"
     expected = list(range(numbers[0], numbers[0] + len(numbers)))
     return "contiguous" if numbers == expected else "gap_restart_or_ocr_error"
+
+
+def _finalise_phase(phase: dict[str, Any]) -> None:
+    numbers = [int(step["number"]) for step in phase["steps"]]
+    phase["step_numbers"] = numbers
+    phase["step_sequence_status"] = _sequence_status(numbers)
 
 
 def _parse_procedure_segment(
@@ -114,10 +124,14 @@ def _parse_procedure_segment(
         if not text:
             continue
 
-        phase = _phase_label(text)
-        if phase is not None:
+        phase_match = _phase_label(text)
+        if phase_match is not None:
+            if current_phase is not None:
+                _finalise_phase(current_phase)
+            canonical_phase, source_form = phase_match
             current_phase = {
-                "label": phase,
+                "label": canonical_phase,
+                "source_label": source_form,
                 "source": _line_ref(line),
                 "steps": [],
             }
@@ -152,29 +166,43 @@ def _parse_procedure_segment(
             )
             continue
 
-        # Continuation text is only attached after an actual numbered step has
-        # been established. Otherwise it is preserved separately and never
-        # silently converted into procedure semantics.
+        # Continuation text is attached only after a numbered step exists.
+        # Otherwise it is preserved but never silently promoted to semantics.
         if current_step is not None:
             current_step["text"] = (current_step["text"] + " " + text).strip()
             current_step["source_lines"].append(_line_ref(line))
         else:
             uncategorised_lines.append(_line_ref(line))
 
+    if current_phase is not None:
+        _finalise_phase(current_phase)
+
     if len(all_steps) < 2 or not phases:
-        # A repair number by itself is not sufficient evidence for a structured
-        # repair procedure. Keep the page classifier conservative.
+        # A repair number alone is insufficient evidence for a procedure.
         return None
 
-    numbers = [step["number"] for step in all_steps]
-    sequence = _sequence_status(numbers)
     review_reasons: list[str] = []
     if title is None:
         review_reasons.append("missing_title")
-    if sequence != "contiguous":
-        review_reasons.append("step_sequence_not_contiguous")
     if any(step["phase"] is None for step in all_steps):
         review_reasons.append("step_without_phase")
+
+    phase_sequence_statuses = [
+        {
+            "phase": phase["label"],
+            "source_label": phase["source_label"],
+            "step_numbers": phase["step_numbers"],
+            "status": phase["step_sequence_status"],
+        }
+        for phase in phases
+    ]
+    bad_phase_sequences = [
+        phase_status
+        for phase_status in phase_sequence_statuses
+        if phase_status["status"] not in {"contiguous", "single_step", "none"}
+    ]
+    if bad_phase_sequences:
+        review_reasons.append("phase_step_sequence_not_contiguous")
 
     low_confidence = []
     for step in all_steps:
@@ -184,6 +212,14 @@ def _parse_procedure_segment(
                 low_confidence.append(source)
     if low_confidence:
         review_reasons.append("low_ocr_confidence_in_step")
+
+    numbers = [step["number"] for step in all_steps]
+    if bad_phase_sequences:
+        overall_sequence = "phase_sequence_issue"
+    elif any(step["phase"] is None for step in all_steps):
+        overall_sequence = "unphased_steps_present"
+    else:
+        overall_sequence = "contiguous_by_phase"
 
     return {
         "structure_version": STRUCTURE_VERSION,
@@ -198,7 +234,8 @@ def _parse_procedure_segment(
         "phases": phases,
         "steps": all_steps,
         "step_numbers": numbers,
-        "step_sequence_status": sequence,
+        "step_sequence_status": overall_sequence,
+        "phase_sequence_statuses": phase_sequence_statuses,
         "uncategorised_lines": uncategorised_lines,
         "review_reasons": review_reasons,
     }
@@ -221,12 +258,7 @@ def _numbered_lines(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _has_standalone_heading(lines: list[dict[str, Any]], heading: str) -> bool:
-    """Require a heading-like line, never a substring inside ordinary prose.
-
-    AKM7169 page 12 contains the ordinary sentence ``marked with its contents``.
-    The old substring classifier therefore mislabeled it as a contents page. A
-    document section marker must instead exist as its own short OCR line.
-    """
+    """Require a heading-like line, never a substring inside ordinary prose."""
     wanted = _normalise_space(heading).upper()
     for line in lines:
         text = _normalise_space(str(line.get("text", ""))).strip(" .:-").upper()
@@ -328,6 +360,7 @@ def run_structure_prototype(layout_root: pathlib.Path, output_root: pathlib.Path
                 "numbered_line_count": structure["numbered_line_count"],
                 "repair_numbers": [p["repair_number"] for p in structure["procedures"]],
                 "procedure_titles": [p["title"] for p in structure["procedures"]],
+                "procedure_sequence_statuses": [p["step_sequence_status"] for p in structure["procedures"]],
             }
         )
 
