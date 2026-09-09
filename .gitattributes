@@ -1,0 +1,2 @@
+depot/*.pdf filter=lfs diff=lfs merge=lfs -text
+depot/*.PDF filter=lfs diff=lfs merge=lfs -text
