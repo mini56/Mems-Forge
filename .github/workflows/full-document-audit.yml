@@ -12,10 +12,13 @@ on:
       - 'src/mems_forge/ocr_reader.py'
       - 'src/mems_forge/ocr_layout.py'
       - 'src/mems_forge/structure_candidates.py'
+      - 'src/mems_forge/procedure_fragments.py'
       - 'src/mems_forge/full_document_audit.py'
       - 'tools/full_document_audit.py'
+      - 'tools/full_fragment_audit.py'
       - 'tests/test_ocr_reader.py'
       - 'tests/test_structure_candidates.py'
+      - 'tests/test_procedure_fragments.py'
       - 'tests/test_full_document_audit.py'
       - '.github/workflows/full-document-audit.yml'
   workflow_dispatch:
@@ -60,6 +63,9 @@ jobs:
 
       - name: Run full 482-page extraction audit
         run: python tools/full_document_audit.py
+
+      - name: Detect full-document continuation fragments
+        run: python tools/full_fragment_audit.py
 
       - name: Upload complete audit artifact
         uses: actions/upload-artifact@v4
