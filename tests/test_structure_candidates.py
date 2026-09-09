@@ -51,7 +51,70 @@ class StructureCandidateTests(unittest.TestCase):
         self.assertEqual([p["repair_number"] for p in result["procedures"]], ["37.25.05", "37.25.09"])
         self.assertEqual(result["procedures"][0]["step_numbers"], [1, 2, 3, 4, 5])
         self.assertEqual(result["procedures"][1]["step_numbers"], list(range(1, 10)))
-        self.assertTrue(all(p["step_sequence_status"] == "contiguous" for p in result["procedures"]))
+        self.assertTrue(all(p["step_sequence_status"] == "contiguous_by_phase" for p in result["procedures"]))
+
+    def test_manufacturer_numbering_restart_between_remove_and_refit_is_clean(self) -> None:
+        payload = {
+            "page_number": 90,
+            "lines": [
+                line("left", 1, "MAIN BEARING CAP OIL SEAL"),
+                line("left", 2, "Service Repair No. 12.21.20"),
+                line("left", 3, "Remove"),
+                line("left", 4, "1. Remove flywheel"),
+                line("left", 5, "2. Remove oil seal"),
+                line("left", 6, "Refit"),
+                line("left", 7, "1. Clean seal location"),
+                line("left", 8, "2. Fit new seal"),
+                line("left", 9, "3. Lubricate seal lip"),
+                line("left", 10, "4. Refit flywheel"),
+            ],
+        }
+        result = analyze_structure_candidates(payload)
+        proc = result["procedures"][0]
+        self.assertEqual(proc["step_numbers"], [1, 2, 1, 2, 3, 4])
+        self.assertEqual(proc["step_sequence_status"], "contiguous_by_phase")
+        self.assertNotIn("phase_step_sequence_not_contiguous", proc["review_reasons"])
+        self.assertEqual(proc["phases"][0]["step_sequence_status"], "contiguous")
+        self.assertEqual(proc["phases"][1]["step_sequence_status"], "contiguous")
+
+    def test_refitting_exact_manufacturer_heading_maps_to_refit(self) -> None:
+        payload = {
+            "page_number": 373,
+            "lines": [
+                line("body", 1, "SUN ROOF FRONT SEAL"),
+                line("body", 2, "Service Repair No. 76.82.65"),
+                line("body", 3, "Remove"),
+                line("body", 4, "1. Open sun roof"),
+                line("body", 5, "2. Release front seal"),
+                line("body", 6, "3. Remove seal"),
+                line("body", 7, "Refitting"),
+                line("body", 8, "1. Clean mounting face"),
+                line("body", 9, "2. Position seal"),
+                line("body", 10, "3. Press seal into place"),
+                line("body", 11, "4. Check alignment"),
+                line("body", 12, "5. Close sun roof"),
+            ],
+        }
+        result = analyze_structure_candidates(payload)
+        proc = result["procedures"][0]
+        self.assertEqual([phase["label"] for phase in proc["phases"]], ["remove", "refit"])
+        self.assertEqual(proc["phases"][1]["source_label"], "refitting")
+        self.assertEqual(proc["phases"][1]["step_numbers"], [1, 2, 3, 4, 5])
+        self.assertEqual(proc["step_sequence_status"], "contiguous_by_phase")
+
+    def test_ocr_typo_phase_is_not_silently_normalised(self) -> None:
+        payload = {
+            "page_number": 120,
+            "lines": [
+                line("body", 1, "TEST UNIT"),
+                line("body", 2, "Service Repair No. 12.34.56"),
+                line("body", 3, "Dismantie"),
+                line("body", 4, "1. First item"),
+                line("body", 5, "2. Second item"),
+            ],
+        }
+        result = analyze_structure_candidates(payload)
+        self.assertEqual(result["procedure_count"], 0)
 
     def test_numbered_component_list_is_not_promoted_to_procedure(self) -> None:
         lines = [line("body", 1, "FRONT SUSPENSION COMPONENTS")]
@@ -74,7 +137,7 @@ class StructureCandidateTests(unittest.TestCase):
         result = analyze_structure_candidates(payload)
         self.assertEqual(result["procedure_count"], 0)
 
-    def test_noncontiguous_steps_are_flagged_for_review(self) -> None:
+    def test_noncontiguous_steps_inside_one_phase_are_flagged(self) -> None:
         payload = {
             "page_number": 99,
             "lines": [
@@ -88,12 +151,11 @@ class StructureCandidateTests(unittest.TestCase):
         result = analyze_structure_candidates(payload)
         self.assertEqual(result["procedure_count"], 1)
         proc = result["procedures"][0]
-        self.assertEqual(proc["step_sequence_status"], "gap_restart_or_ocr_error")
-        self.assertIn("step_sequence_not_contiguous", proc["review_reasons"])
+        self.assertEqual(proc["step_sequence_status"], "phase_sequence_issue")
+        self.assertIn("phase_step_sequence_not_contiguous", proc["review_reasons"])
+        self.assertEqual(proc["phases"][0]["step_sequence_status"], "gap_restart_or_ocr_error")
 
     def test_contents_word_inside_prose_does_not_classify_contents_page(self) -> None:
-        # Real failure class found on AKM7169 page 12: "marked with its contents"
-        # is ordinary fuel-handling prose, not a CONTENTS heading.
         lines = [
             line("left", 1, "GENERAL INFORMATION"),
             line("left", 2, "FUEL HANDLING PRECAUTIONS"),
