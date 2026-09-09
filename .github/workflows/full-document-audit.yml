@@ -13,9 +13,11 @@ on:
       - 'src/mems_forge/ocr_layout.py'
       - 'src/mems_forge/structure_candidates.py'
       - 'src/mems_forge/procedure_fragments.py'
+      - 'src/mems_forge/audit_postprocess.py'
       - 'src/mems_forge/full_document_audit.py'
       - 'tools/full_document_audit.py'
       - 'tools/full_fragment_audit.py'
+      - 'tools/postprocess_full_audit.py'
       - 'tests/test_ocr_reader.py'
       - 'tests/test_structure_candidates.py'
       - 'tests/test_procedure_fragments.py'
@@ -66,6 +68,9 @@ jobs:
 
       - name: Detect full-document continuation fragments
         run: python tools/full_fragment_audit.py
+
+      - name: Correct final audit summary with phase-local rules
+        run: python tools/postprocess_full_audit.py
 
       - name: Upload complete audit artifact
         uses: actions/upload-artifact@v4
