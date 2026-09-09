@@ -2,7 +2,6 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $RepoUrl = 'https://github.com/mini56/Mems-Forge.git'
-$RepoDir = Join-Path $env:USERPROFILE 'Documents\Mems-Forge'
 
 function Show-Message([string]$Text, [string]$Title = 'MEMS Forge') {
     Add-Type -AssemblyName PresentationFramework
@@ -27,11 +26,19 @@ function Find-Git {
 
 $Git = Find-Git
 
-if (-not (Test-Path (Join-Path $RepoDir '.git'))) {
-    $parent = Split-Path $RepoDir -Parent
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    & $Git clone $RepoUrl $RepoDir
-    if ($LASTEXITCODE -ne 0) { throw 'Impossible de cloner le depot Mems-Forge.' }
+# Si l'outil est lancé depuis un clone existant, utilise ce clone quel que soit son emplacement.
+$scriptRepo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+if (Test-Path (Join-Path $scriptRepo '.git')) {
+    $RepoDir = $scriptRepo
+} else {
+    # Mode autonome : crée le clone dans Documents si nécessaire.
+    $RepoDir = Join-Path $env:USERPROFILE 'Documents\Mems-Forge'
+    if (-not (Test-Path (Join-Path $RepoDir '.git'))) {
+        $parent = Split-Path $RepoDir -Parent
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        & $Git clone $RepoUrl $RepoDir
+        if ($LASTEXITCODE -ne 0) { throw 'Impossible de cloner le depot Mems-Forge.' }
+    }
 }
 
 Set-Location $RepoDir
