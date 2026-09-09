@@ -1,0 +1,37 @@
+name: MEMS Forge — PDF intake
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'depot/**/*.pdf'
+      - 'depot/**/*.PDF'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  intake:
+    name: Register deposited PDFs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build PDF intake manifest
+        run: python tools/depot_intake.py
+
+      - name: Upload intake manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-pdf-intake-${{ github.run_id }}
+          path: out/intake/pdf_intake_manifest.json
+          if-no-files-found: error
