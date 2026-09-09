@@ -5,6 +5,8 @@ on:
     branches:
       - main
     paths:
+      - 'depot/*.pdf'
+      - 'depot/*.PDF'
       - 'depot/**/*.pdf'
       - 'depot/**/*.PDF'
   workflow_dispatch:
