@@ -10,28 +10,37 @@ function Show-Message([string]$Text, [string]$Title = 'MEMS Forge') {
 
 function Find-Git {
     $cmd = Get-Command git.exe -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
+    if ($cmd -and $cmd.Source) {
+        return [string]$cmd.Source
+    }
 
     $desktopRoot = Join-Path $env:LOCALAPPDATA 'GitHubDesktop'
     if (Test-Path $desktopRoot) {
-        $candidates = Get-ChildItem $desktopRoot -Directory -Filter 'app-*' -ErrorAction SilentlyContinue |
+        $candidate = Get-ChildItem $desktopRoot -Directory -Filter 'app-*' -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |
             ForEach-Object { Join-Path $_.FullName 'resources\app\git\cmd\git.exe' } |
-            Where-Object { Test-Path $_ }
-        if ($candidates) { return $candidates[0] }
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+        if ($candidate) {
+            return [string]$candidate
+        }
     }
 
     throw 'Git est introuvable. Installe GitHub Desktop, connecte-toi a GitHub, puis relance cet outil.'
 }
 
 $Git = Find-Git
+if (-not (Test-Path -LiteralPath $Git)) {
+    throw "Git est introuvable au chemin detecte : $Git"
+}
 
-# Si l'outil est lancé depuis un clone existant, utilise ce clone quel que soit son emplacement.
+# Si l'outil est lance depuis un clone existant, utilise ce clone quel que soit son emplacement.
 $scriptRepo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if (Test-Path (Join-Path $scriptRepo '.git')) {
     $RepoDir = $scriptRepo
 } else {
-    # Mode autonome : crée le clone dans Documents si nécessaire.
+    # Mode autonome : cree le clone dans Documents si necessaire.
     $RepoDir = Join-Path $env:USERPROFILE 'Documents\Mems-Forge'
     if (-not (Test-Path (Join-Path $RepoDir '.git'))) {
         $parent = Split-Path $RepoDir -Parent
