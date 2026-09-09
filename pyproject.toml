@@ -7,7 +7,9 @@ name = "mems-forge"
 version = "0.1.0.dev0"
 description = "MEMS Forge knowledge-base construction and validation tools"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "PyMuPDF==1.28.2",
+]
 
 [project.scripts]
 mems-forge = "mems_forge.cli:main"
