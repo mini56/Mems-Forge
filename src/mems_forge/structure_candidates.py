@@ -6,7 +6,7 @@ import re
 from collections import defaultdict
 from typing import Any
 
-STRUCTURE_VERSION = "0.1.0"
+STRUCTURE_VERSION = "0.1.1"
 
 REPAIR_NO_RE = re.compile(r"\bService\s+Repair\s+No\.?\s*([0-9]+(?:\.[0-9]+){1,4})\b", re.IGNORECASE)
 STEP_RE = re.compile(r"^\s*(\d{1,3})\.\s*(.*)$")
@@ -220,6 +220,21 @@ def _numbered_lines(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _has_standalone_heading(lines: list[dict[str, Any]], heading: str) -> bool:
+    """Require a heading-like line, never a substring inside ordinary prose.
+
+    AKM7169 page 12 contains the ordinary sentence ``marked with its contents``.
+    The old substring classifier therefore mislabeled it as a contents page. A
+    document section marker must instead exist as its own short OCR line.
+    """
+    wanted = _normalise_space(heading).upper()
+    for line in lines:
+        text = _normalise_space(str(line.get("text", ""))).strip(" .:-").upper()
+        if text == wanted:
+            return True
+    return False
+
+
 def analyze_structure_candidates(layout_payload: dict[str, Any]) -> dict[str, Any]:
     page_number = int(layout_payload["page_number"])
     all_lines = list(layout_payload.get("lines", []))
@@ -260,14 +275,13 @@ def analyze_structure_candidates(layout_payload: dict[str, Any]) -> dict[str, An
     for region in body_regions:
         numbered.extend(_numbered_lines(by_region[region]))
 
-    upper_text = "\n".join(_normalise_space(str(line.get("text", ""))).upper() for line in all_lines)
     if procedures:
         page_class = "repair_procedure_page"
-    elif "CONTENTS" in upper_text and len(all_lines) >= 8:
+    elif _has_standalone_heading(all_lines, "CONTENTS") and len(all_lines) >= 8:
         page_class = "contents_page_candidate"
     elif len(numbered) >= 5:
         page_class = "numbered_component_or_reference_list_candidate"
-    elif "INTRODUCTION" in upper_text:
+    elif _has_standalone_heading(all_lines, "INTRODUCTION"):
         page_class = "front_matter_or_narrative_candidate"
     else:
         page_class = "unclassified_candidate"
