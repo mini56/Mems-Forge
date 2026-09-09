@@ -12,6 +12,7 @@ on:
       - 'src/mems_forge/**'
       - 'tools/depot_intake.py'
       - 'tools/process_depot.py'
+      - 'tools/ocr_prototype.py'
       - 'tests/**'
       - 'pyproject.toml'
       - '.github/workflows/pdf-intake.yml'
@@ -38,6 +39,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install OCR engine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          tesseract --version
+
       - name: Install MEMS Forge reader
         run: |
           python -m pip install --upgrade pip
@@ -54,12 +61,16 @@ jobs:
           MEMS_FORGE_BEFORE_SHA: ${{ github.event.before }}
         run: python tools/process_depot.py
 
-      - name: Upload intake and raw-reader audit
+      - name: Run controlled OCR prototype
+        run: python tools/ocr_prototype.py
+
+      - name: Upload intake, raw-reader audit and OCR prototype
         uses: actions/upload-artifact@v4
         with:
           name: mems-forge-pdf-reader-${{ github.run_id }}
           path: |
             out/intake/
             out/reader/
+            out/ocr-prototype/
           if-no-files-found: error
           compression-level: 6
