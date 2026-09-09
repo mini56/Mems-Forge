@@ -91,6 +91,28 @@ class StructureCandidateTests(unittest.TestCase):
         self.assertEqual(proc["step_sequence_status"], "gap_restart_or_ocr_error")
         self.assertIn("step_sequence_not_contiguous", proc["review_reasons"])
 
+    def test_contents_word_inside_prose_does_not_classify_contents_page(self) -> None:
+        # Real failure class found on AKM7169 page 12: "marked with its contents"
+        # is ordinary fuel-handling prose, not a CONTENTS heading.
+        lines = [
+            line("left", 1, "GENERAL INFORMATION"),
+            line("left", 2, "FUEL HANDLING PRECAUTIONS"),
+            line("left", 3, "The receptacle should be clearly marked with its contents, and placed in a safe storage area."),
+            line("right", 4, "Fuel tank removal"),
+            line("right", 5, "Fuel tank repairs"),
+            line("right", 6, "Body and chassis repairs"),
+            line("right", 7, "Petrol vapour is highly flammable."),
+            line("right", 8, "Fuel lines must not be removed whilst the vehicle is over an inspection pit."),
+        ]
+        result = analyze_structure_candidates({"page_number": 12, "lines": lines})
+        self.assertNotEqual(result["page_class"], "contents_page_candidate")
+
+    def test_standalone_contents_heading_can_classify_contents_page(self) -> None:
+        lines = [line("body", 1, "CONTENTS")]
+        lines.extend(line("body", i + 2, f"Section {i} ........ {i}") for i in range(1, 9))
+        result = analyze_structure_candidates({"page_number": 3, "lines": lines})
+        self.assertEqual(result["page_class"], "contents_page_candidate")
+
 
 if __name__ == "__main__":
     unittest.main()
