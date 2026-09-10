@@ -4,6 +4,7 @@ import json
 import pathlib
 
 from mems_forge.full_document_audit import run_full_document_audit
+from mems_forge.ocr_review import refine_full_ocr_review
 
 
 def main() -> int:
@@ -21,8 +22,9 @@ def main() -> int:
     # identifies the latest deposited test source without mutating older sources.
     pdf = pdfs[-1]
     print(f"Full document audit: {pdf.as_posix()}")
-    summary = run_full_document_audit(pdf, pathlib.Path("out/full-audit"))
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    run_full_document_audit(pdf, pathlib.Path("out/full-audit"))
+    refined = refine_full_ocr_review(pathlib.Path("out/full-audit"))
+    print(json.dumps(refined, indent=2, ensure_ascii=False))
     return 0
 
 
