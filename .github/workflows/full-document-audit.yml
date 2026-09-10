@@ -13,17 +13,21 @@ on:
       - 'src/mems_forge/ocr_quality.py'
       - 'src/mems_forge/ocr_layout.py'
       - 'src/mems_forge/structure_candidates.py'
+      - 'src/mems_forge/document_hierarchy.py'
       - 'src/mems_forge/procedure_fragments.py'
       - 'src/mems_forge/audit_postprocess.py'
       - 'src/mems_forge/full_document_audit.py'
       - 'tools/full_document_audit.py'
+      - 'tools/document_hierarchy_audit.py'
       - 'tools/ocr_quality_audit.py'
       - 'tools/full_fragment_audit.py'
       - 'tools/postprocess_full_audit.py'
       - 'tests/test_ocr_reader.py'
       - 'tests/test_ocr_quality.py'
       - 'tests/test_structure_candidates.py'
+      - 'tests/test_document_hierarchy.py'
       - 'tests/test_procedure_fragments.py'
+      - 'tests/test_fragment_context.py'
       - 'tests/test_full_document_audit.py'
       - '.github/workflows/full-document-audit.yml'
   workflow_dispatch:
@@ -69,10 +73,13 @@ jobs:
       - name: Run full 482-page extraction audit
         run: python tools/full_document_audit.py
 
+      - name: Reconstruct manufacturer chapter hierarchy
+        run: python tools/document_hierarchy_audit.py
+
       - name: Audit OCR spelling before translation
         run: python tools/ocr_quality_audit.py
 
-      - name: Detect full-document continuation fragments
+      - name: Detect chapter-constrained continuation fragments
         run: python tools/full_fragment_audit.py
 
       - name: Correct final audit summary with phase-local rules
