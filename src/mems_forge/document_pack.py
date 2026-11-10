@@ -67,7 +67,7 @@ def build_document_pack(
         revision = "REV_" + source_sha
         document = "DOC_" + source_sha[:24]
         count = {"pages": 0, "blocks": 0, "spans": 0, "image_occurrences": 0,
-                 "reviews": 0, "ocr_pages": 0, "ocr_words": 0}
+                 "reviews": 0, "ocr_pages": 0, "ocr_words": 0, "ocr_variants": 0}
         ocr_members = {}
         with closing(sqlite3.connect(database_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
@@ -138,6 +138,16 @@ def build_document_pack(
                 "left_px INTEGER,top_px INTEGER,width_px INTEGER,height_px INTEGER,"
                 "PRIMARY KEY(page_id,word_index))"
             )
+            db.execute(
+                "CREATE TABLE pack_ocr_variants("
+                "variant_id TEXT PRIMARY KEY,"
+                "page_id TEXT NOT NULL REFERENCES pack_ocr_pages(page_id),"
+                "region TEXT NOT NULL,method TEXT NOT NULL,"
+                "source_bbox_pdf_json TEXT NOT NULL,"
+                "candidate_text TEXT NOT NULL,"
+                "crosschecked INTEGER NOT NULL CHECK(crosschecked IN (0,1)),"
+                "approved_for_ai INTEGER NOT NULL DEFAULT 0 CHECK(approved_for_ai=0))"
+            )
             if ocr_root is not None:
                 directory = Path(ocr_root) / source_sha
                 pages_dir = directory / "pages"
@@ -168,6 +178,38 @@ def build_document_pack(
                          int(bool(page_data.get("review_required"))), raw["sha256"]),
                     )
                     count["ocr_pages"] += 1
+                    # Enhanced OCR candidate evidence is stored independently
+                    # from the original TSV. No candidate text becomes a
+                    # validated technical fact merely because two modes agree.
+                    enhancement = page_data.get("adaptive_extraction") or {}
+                    recovered = enhancement.get("recovered_list")
+                    variants = []
+                    if recovered:
+                        variants.append((
+                            "recovered_numbered_list", "psm6_200dpi_400dpi",
+                            recovered.get("roi_pdf", []),
+                            recovered.get("candidate_text", ""),
+                            bool(recovered.get("independent_render_readings_agree")),
+                        ))
+                    for region, candidate in sorted((enhancement.get("columns") or {}).items()):
+                        variants.append((
+                            "column_" + region,
+                            str(candidate.get("candidate_mode") or "unknown"),
+                            candidate.get("bbox_pdf", []),
+                            candidate.get("text", ""),
+                            False,
+                        ))
+                    for ordinal, (region, method, bbox, candidate_text, crosschecked) in enumerate(variants):
+                        if (not isinstance(candidate_text, str) or not candidate_text.strip()
+                                or not isinstance(bbox, list) or len(bbox) != 4
+                                or not all(isinstance(value, (float, int)) for value in bbox)):
+                            raise ValueError(f"Invalid adaptive OCR provenance on page {n}")
+                        db.execute(
+                            "INSERT INTO pack_ocr_variants VALUES(?,?,?,?,?,?,?,0)",
+                            (f"{page_id}:ocrvariant:{ordinal}", page_id, region, method,
+                             json.dumps(bbox), candidate_text, int(crosschecked)),
+                        )
+                        count["ocr_variants"] += 1
                     for ix, word in enumerate(page_data.get("words") or []):
                         db.execute(
                             "INSERT INTO pack_ocr_words VALUES(?,?,?,?,?,?,?,?)",
@@ -295,6 +337,12 @@ def inspect_document_pack(path: Path) -> dict:
                     integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
                     pages = db.execute("SELECT COUNT(*) FROM source_pages").fetchone()[0]
                     ocr_pages = db.execute("SELECT COUNT(*) FROM pack_ocr_pages").fetchone()[0]
+                    ocr_variants = db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_variants"
+                    ).fetchone()[0]
+                    incorrectly_approved = db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_variants WHERE approved_for_ai<>0"
+                    ).fetchone()[0]
                     metadata = db.execute(
                         "SELECT value FROM database_metadata WHERE key='publication_state'"
                     ).fetchone()
@@ -302,6 +350,8 @@ def inspect_document_pack(path: Path) -> dict:
                             db.execute("PRAGMA foreign_key_check").fetchall() or
                             pages != manifest["source"]["pages"] or
                             ocr_pages != manifest["counts"].get("ocr_pages", 0) or
+                            ocr_variants != manifest["counts"].get("ocr_variants", 0) or
+                            incorrectly_approved or
                             metadata is None or metadata[0] != "blocked_semantic_review"):
                         return {"valid": False, "error": "sqlite_validation_failed"}
             return {
