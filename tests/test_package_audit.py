@@ -167,7 +167,7 @@ class InstalledCorpusAuditTest(unittest.TestCase):
         report = self.audit()
         self.assertEqual(report["document_mapping"]["unmatched_count"], 0)
         self.assertEqual(report["document_mapping"]["matched"][0]["proof"],
-                         "SHA256_PREFIX_OF_ORIGINAL_PDF")
+                         "DOCUMENT_METADATA_EXACT_SHA256")
         self.assertEqual(report["document_mapping"]["verified_original_pages"], 2)
 
     def test_additional_pdf_not_in_pack_blocks_exhaustiveness_claim(self):
