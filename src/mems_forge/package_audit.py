@@ -718,7 +718,15 @@ def audit_install(
         blockers.append("PACK_SEARCH_EMPTY")
     if expert_image_links.get("error"):
         blockers.append("EXPERT_IMAGE_LINK_AUDIT_FAILED")
-    if expert_image_links.get("correction_lot_status") != "OK":
+    # Require the signed lot only when the legacy references it repairs are
+    # actually present. Independent SQLite fixtures and future fully migrated
+    # bases must not fail solely because they do not ship that historical lot.
+    historical_wiring_refs = [
+        item for item in expert_image_links["unresolved"]
+        if str(item.get("knowledge_key", "")).startswith("KNOW-RAVE-WIR-MPI-")
+        and "39.1" in str(item.get("image_ref", ""))
+    ]
+    if historical_wiring_refs and expert_image_links.get("correction_lot_status") != "OK":
         blockers.append("VERIFIED_RAVE_SOURCE_CORRECTION_LOT_UNAVAILABLE")
     if expert_image_links["unresolved"]:
         blockers.append(
