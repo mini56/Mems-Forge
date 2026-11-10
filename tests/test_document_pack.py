@@ -44,6 +44,11 @@ def test_genuine_two_page_pdf_produces_searchable_verified_candidate(pdf, tmp_pa
             ("%temperature sensor%",),
         ).fetchone()[0] >= 1
         assert conn.execute("SELECT COUNT(*) FROM raw_spans").fetchone()[0] >= 1
+    from mems_forge.db_tester import search_database
+    result = search_database(db, "temperature sensor")
+    assert result["count"] >= 1
+    assert any(row["source_table"] == "raw_blocks" for row in result["results"])
+    assert any(":p1" in row["fields"]["page_id"] for row in result["results"])
 
 
 def test_corrupted_source_member_fails_integrity(pdf, tmp_path):

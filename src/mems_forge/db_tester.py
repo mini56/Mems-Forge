@@ -16,6 +16,7 @@ SEARCH_CONFIG: dict[str, tuple[str, ...]] = {
     "mems_knowledge_item": ("knowledge_key", "topic", "source_text", "image_ref", "document"),
     "documents": ("document_id", "title", "manufacturer"),
     "structured_entities": ("entity_id", "entity_type", "payload_json"),
+    "raw_blocks": ("source_text",),
 }
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "memslibrary_search": (
@@ -31,6 +32,7 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     ),
     "documents": ("document_id", "title", "manufacturer"),
     "structured_entities": ("entity_id", "entity_type", "payload_json", "validation_state"),
+    "raw_blocks": ("raw_block_id", "page_id", "source_text", "extraction_method"),
 }
 
 

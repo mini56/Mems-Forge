@@ -6,6 +6,9 @@ on:
     paths:
       - "src/mems_forge/package_audit.py"
       - "src/mems_forge/db_tester.py"
+      - "src/mems_forge/document_pack.py"
+      - "tools/build_pack_candidates.py"
+      - "tests/test_document_pack.py"
       - "src/mems_forge/cli.py"
       - "src/mems_forge/source_corrections.py"
       - "tests/test_package_audit.py"
