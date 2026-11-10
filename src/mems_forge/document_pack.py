@@ -18,6 +18,7 @@ import zipfile
 from . import __version__
 from .database import initialize_database
 from .pdf_reader import analyze_pdf, sha256_file
+from .ocr_reader import _parse_words, _words_to_text
 
 
 def records(path: Path):
@@ -352,6 +353,45 @@ def inspect_document_pack(path: Path) -> dict:
                     metadata = db.execute(
                         "SELECT value FROM database_metadata WHERE key='publication_state'"
                     ).fetchone()
+                    # Compare immutable OCR TSV with BOTH the SQLite words
+                    # and the searchable text. Checksums alone are insufficient
+                    # if one layer was generated from an unrelated OCR result.
+                    for n in range(1, pages + 1):
+                        page_id = "REV_" + manifest["source"]["sha256"] + f":p{n}"
+                        indexed_page = db.execute(
+                            "SELECT text,raw_tsv_sha256 FROM pack_ocr_pages "
+                            "WHERE page_id=?", (page_id,),
+                        ).fetchone()
+                        if indexed_page is None:
+                            continue
+                        member = f"ocr/page-{n:04d}.tsv.gz"
+                        if member not in archive.namelist():
+                            return {"valid": False, "error": "ocr_source_tsv_missing", "page": n}
+                        original_tsv = gzip.decompress(archive.read(member))
+                        if _hash(original_tsv) != indexed_page[1]:
+                            return {"valid": False, "error": "ocr_source_tsv_sha256_mismatch",
+                                    "page": n}
+                        parsed, warnings = _parse_words(
+                            original_tsv.decode("utf-8"), n
+                        )
+                        if warnings:
+                            return {"valid": False, "error": "ocr_source_tsv_parse_warning",
+                                    "page": n}
+                        if _words_to_text(parsed) != indexed_page[0]:
+                            return {"valid": False, "error": "ocr_text_not_from_source_tsv",
+                                    "page": n}
+                        indexed_words = db.execute(
+                            "SELECT text,confidence,left_px,top_px,width_px,height_px "
+                            "FROM pack_ocr_words WHERE page_id=? ORDER BY word_index",
+                            (page_id,),
+                        ).fetchall()
+                        expected_words = [
+                            (word.text, word.confidence, word.left, word.top,
+                             word.width, word.height) for word in parsed
+                        ]
+                        if indexed_words != expected_words:
+                            return {"valid": False, "error": "ocr_words_not_from_source_tsv",
+                                    "page": n}
                     if (integrity != "ok" or
                             db.execute("PRAGMA foreign_key_check").fetchall() or
                             pages != manifest["source"]["pages"] or
