@@ -117,6 +117,14 @@ def refine_full_ocr_review(full_audit_root: pathlib.Path) -> dict[str, Any]:
     for page_file in page_files:
         page = json.loads(page_file.read_text(encoding="utf-8"))
         reasons, semantic = page_review_reasons(page)
+        # Never erase hard extraction defects just because the OCR's mean
+        # confidence is high. Page 116 is a documented example.
+        hard_reasons = [
+            reason for reason in page.get("review_reasons", [])
+            if reason in {"automatic_region_recovery_failed",
+                          "collapsed_list_ocr_modes_conflict"}
+        ]
+        reasons = list(dict.fromkeys(reasons + hard_reasons))
         localized_word_count = int(semantic["below_85"])
 
         page["ocr_review_version"] = OCR_REVIEW_VERSION
