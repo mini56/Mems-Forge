@@ -5,7 +5,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from .package_audit import _readonly_sqlite, _safe_file
+from .package_audit import _readonly_sqlite, resolve_image_reference
 
 # These are existing, independently populated database schemas. A query cannot
 # choose arbitrary SQL identifiers or modify an installed database.
@@ -86,10 +86,11 @@ def search_database(
                     if installed_root is not None:
                         value = entry["fields"].get("image_ref")
                         if value:
-                            image = _safe_file(installed_root / "database" / "reference", value)
-                            entry["source_file_found"] = bool(image and image.is_file())
-                            if image and image.is_file():
-                                entry["source_file"] = str(image)
+                            resolved = resolve_image_reference(installed_root, value)
+                            entry["source_file_found"] = resolved["status"] == "OK"
+                            entry["image_reference_status"] = resolved["status"]
+                            if resolved["status"] == "OK":
+                                entry["source_file"] = resolved["path"]
                     result["results"].append(entry)
                     remaining -= 1
                     if remaining == 0:
@@ -98,3 +99,36 @@ def search_database(
         result["errors"].append(str(exc))
     result["count"] = len(result["results"])
     return result
+
+
+def search_installed_databases(
+    install_root: Path, term: str, *, limit: int = 20
+) -> dict[str, Any]:
+    """Search Pack001 and the expert database in one request, read-only.
+
+    These are separate existing databases with distinct schemas. A query that
+    misses Pack001 must still reach the expert SQLite, not be declared empty.
+    """
+    paths = [
+        ("memslibrary_pack", install_root / "MEMSLibrary_Pack_001" / "knowledge.sqlite"),
+        ("expert_database", install_root / "database" / "expert" / "ia_mems_reference_r20.sqlite"),
+    ]
+    found: dict[str, Any] = {
+        "query": term, "results": [], "bases": [], "errors": [],
+    }
+    max_results = max(1, min(50, limit))
+    for name, path in paths:
+        partial = search_database(
+            path, term, limit=max_results, installed_root=install_root,
+        )
+        found["bases"].append({
+            "name": name, "path": str(path), "hits": partial.get("count", 0),
+            "errors": partial["errors"],
+        })
+        if partial["errors"]:
+            found["errors"].append({name: partial["errors"]})
+        for row in partial["results"]:
+            if len(found["results"]) < max_results:
+                found["results"].append({"source_database": name, **row})
+    found["count"] = len(found["results"])
+    return found
