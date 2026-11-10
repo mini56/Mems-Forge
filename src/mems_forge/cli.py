@@ -43,6 +43,13 @@ def build_parser() -> argparse.ArgumentParser:
     tester.add_argument("--limit", type=int, default=20)
     tester.add_argument("--install-root", type=Path)
 
+    corrected = sub.add_parser(
+        "build-corrected-expert",
+        help="Rebuild a separate expert SQLite with verified 1750 citations (never overwrite source)",
+    )
+    corrected.add_argument("--install-root", type=Path, required=True)
+    corrected.add_argument("--output", type=Path, required=True)
+    corrected.add_argument("--report", type=Path)
     return parser
 
 
@@ -76,6 +83,14 @@ def main() -> int:
             "report_dir": str(args.report_dir),
         }, indent=2, ensure_ascii=False))
         return 2 if gate["blockers"] else 0
+
+    if args.command == "build-corrected-expert":
+        from .source_corrections import build_corrected_expert_database
+        result = build_corrected_expert_database(
+            args.install_root, args.output, evidence_report=args.report
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
 
     if args.command == "tester":
         from .db_tester import search_database, search_installed_databases

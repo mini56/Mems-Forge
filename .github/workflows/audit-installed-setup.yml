@@ -115,6 +115,10 @@ jobs:
           if($LASTEXITCODE -ne 0){Write-Host 'MEMS_FORGE_TESTER_EXPERT_FAILED'}
           & python -m mems_forge tester --install-root $destination --query 'sonde' --limit 12 > "$outDir/tester_toutes_bases_sonde.json"
           if($LASTEXITCODE -ne 0){Write-Host 'MEMS_FORGE_TESTER_BOTH_DATABASES_FAILED'}
+          $correctedDb=Join-Path $outDir 'ia_mems_reference_r20.corrected.sqlite'
+          & python -m mems_forge build-corrected-expert --install-root $destination --output $correctedDb --report "$outDir/corrected_expert_report.json"
+          if($LASTEXITCODE -ne 0){throw 'VERIFIED_SOURCE_CORRECTIONS_FAILED'}
+          Write-Host "CANONICAL_EXPERT_CORRECTIONS_PRODUCED=$correctedDb"
       - name: Publier les preuves meme si des donnees manquent
         if: always()
         uses: actions/upload-artifact@v4
