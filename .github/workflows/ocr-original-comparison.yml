@@ -72,10 +72,10 @@ jobs:
                   if ("Clean crankshaft pulley" not in report["regions"]["left"]["text"] or
                           "TIMING CHAIN" not in report["regions"]["right"]["text"]):
                       raise SystemExit("TWO_COLUMN_REGIONAL_READ_FAILED")
-                  if report["regions"]["left"]["numbering"]["numbers"][0] != 1:
-                      raise SystemExit("LEFT_COLUMN_FIRST_STEP_NOT_RECOVERED")
-                  if report["regions"]["right"]["numbering"]["numbers"][0] != 1:
-                      raise SystemExit("RIGHT_COLUMN_FIRST_STEP_NOT_RECOVERED")
+                  if report["regions"]["left"]["numbering"]["numbers"] != list(range(1,22)):
+                      raise SystemExit("LEFT_COLUMN_ALL_21_STEPS_NOT_RECOVERED")
+                  if report["regions"]["right"]["numbering"]["numbers"] != list(range(1,8)):
+                      raise SystemExit("RIGHT_COLUMN_ALL_7_STEPS_NOT_RECOVERED")
               if page == 116:
                   psm3 = report["numbering"]["psm3_whole"]
                   psm4 = report["numbering"]["psm4_whole"]
