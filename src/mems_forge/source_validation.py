@@ -64,6 +64,10 @@ def audit_source_pack(pack_path: Path) -> dict:
         "pages_checked": 0,
         "native_text_pages": 0,
         "ocr_pages": 0,
+        "structured_technical_entities": 0,
+        "structured_entities_with_provenance": 0,
+        "structured_entities_marked_validated": 0,
+        "applicability_records": 0,
         "issues": [],
         "reviews": [],
         "publication_state": "BLOCKED_SEMANTIC_VALIDATION",
@@ -113,6 +117,32 @@ def audit_source_pack(pack_path: Path) -> dict:
                             or revisions[0]["page_count"] != pdf.page_count):
                         report["issues"].append(_issue("REVISION_PROVENANCE_MISMATCH"))
                         return report
+                    # Having OCR words does not mean that a searchable technical
+                    # knowledge base exists: inspect the populated fact tables.
+                    report["structured_technical_entities"] = db.execute(
+                        "SELECT COUNT(*) FROM structured_entities"
+                    ).fetchone()[0]
+                    report["structured_entities_with_provenance"] = db.execute(
+                        "SELECT COUNT(DISTINCT entity_id) FROM provenance"
+                    ).fetchone()[0]
+                    report["structured_entities_marked_validated"] = db.execute(
+                        "SELECT COUNT(*) FROM structured_entities "
+                        "WHERE lower(validation_state) IN ('validated','verified','approved')"
+                    ).fetchone()[0]
+                    report["applicability_records"] = db.execute(
+                        "SELECT COUNT(*) FROM applicability"
+                    ).fetchone()[0]
+                    if report["structured_technical_entities"] == 0:
+                        report["reviews"].append(_issue(
+                            "NO_STRUCTURED_TECHNICAL_FACTS"
+                        ))
+                    elif (report["structured_entities_with_provenance"] <
+                          report["structured_technical_entities"]):
+                        report["issues"].append(_issue(
+                            "STRUCTURED_FACTS_WITHOUT_SOURCE_PROVENANCE"
+                        ))
+                    # Flags in a candidate SQLite are not evidence of approval.
+                    # A separate trusted publication gate is still mandatory.
                     for number, page in enumerate(pdf, start=1):
                         entry = stored_pages[number - 1]
                         page_id = entry["page_id"]
