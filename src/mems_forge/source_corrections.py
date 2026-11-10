@@ -7,6 +7,7 @@ their exact SQL evidence, rather than silently replacing an old citation.
 from __future__ import annotations
 
 import base64
+from contextlib import closing
 import hashlib
 import os
 import shutil
@@ -223,7 +224,7 @@ def build_corrected_expert_database(
     try:
         shutil.copy2(source, temp_file)
         updates = []
-        with sqlite3.connect(temp_file) as db:
+        with closing(sqlite3.connect(temp_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
             db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS mems_source_correction_history(
