@@ -13,6 +13,7 @@ from typing import Any
 
 import pymupdf
 
+from mems_forge.adaptive_coverage import write_adaptive_coverage
 from mems_forge.ocr_layout import run_layout_prototype
 from mems_forge.ocr_reader import (
     OCR_VERSION,
@@ -196,6 +197,7 @@ def _run_full_ocr(
                     "sha256": render_sha,
                     "retained_as_preview": page_number in preview_pages,
                 },
+                "adaptive_evaluation_version": 1,
                 "adaptive_extraction": adaptive,
                 "adaptive_failure": adaptive_failure,
                 "raw_ocr": {
@@ -234,9 +236,23 @@ def _run_full_ocr(
                     f"words={len(words)} mean={confidence['mean']} review={bool(review_reasons)}"
                 )
 
+    # Fail if even one physical page lacks completed baseline/adaptive
+    # evaluation. Coverage counts do not assert that OCR text is accurate.
+    coverage = write_adaptive_coverage(
+        output_root, source_sha, doc.page_count,
+        output_root.parent / "adaptive_coverage.json",
+    )
     summary = {
         "full_audit_version": FULL_AUDIT_VERSION,
         "ocr_version": OCR_VERSION,
+        "adaptive_coverage": {
+            "pages_evaluated": coverage["pages_evaluated"],
+            "every_page_evaluated": coverage["every_page_evaluated"],
+            "status_counts": coverage["status_counts"],
+            "issue_counts": coverage["issue_counts"],
+            "unresolved_pages": coverage["unresolved_pages"],
+            "approved_for_publication": False,
+        },
         "source": {
             "path": pdf_path.as_posix(),
             "filename": pdf_path.name,
@@ -361,6 +377,7 @@ def run_full_document_audit(
                 }
             ),
         },
+        "adaptive_coverage": ocr_summary["adaptive_coverage"],
         "publication_gate": "BLOCKED_REVIEW",
         "blocking_reasons": blocking_reasons,
         "statement": (
