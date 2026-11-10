@@ -7,7 +7,10 @@ on:
       - "src/mems_forge/package_audit.py"
       - "src/mems_forge/db_tester.py"
       - "src/mems_forge/cli.py"
+      - "src/mems_forge/source_corrections.py"
       - "tests/test_package_audit.py"
+      - "tests/test_source_corrections.py"
+      - "data/verified_supplemental_sources.json"
       - "data/rave_47_originals.json"
       - ".github/workflows/audit-installed-setup.yml"
   workflow_dispatch:

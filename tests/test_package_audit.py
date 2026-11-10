@@ -139,6 +139,43 @@ class InstalledCorpusAuditTest(unittest.TestCase):
         self.assertIn("PACK_PDF_PHYSICAL_PAGES_INCOMPLETE:1",
                       report["publication_gate"]["blockers"])
 
+    def test_additional_verified_document_is_classified_as_partial_not_absent(self):
+        from mems_forge.package_audit import inspect_supplemental_source
+        extra = {
+            "file": str(self.pdf),
+            "pages": 2,
+            "sha256": file_sha256(self.pdf),
+        }
+        reg = Path(self.tmp.name) / "supplementary.json"
+        reg.write_text(json.dumps({
+            "documents": [{
+                "document": "TEST990e",
+                "expected_sha256": extra["sha256"],
+                "physical_pages": 2,
+                "source_provenance": "factory/test-audit.md",
+                "structured_knowledge_prefix": "sensor",
+                "expected_existing_structured_knowledge": 1,
+                "expected_existing_selected_visual_pages": 1,
+            }]
+        }), encoding="utf-8")
+        manifest = self.installed / "database" / "reference" / "manifest.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        for item in data["visual_assets"].values():
+            item["document"] = "TEST990e"
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+        expert = (self.installed / "database" / "expert" /
+                  "ia_mems_reference_r20.sqlite")
+        status = inspect_supplemental_source(
+            extra, self.installed, expert, registry_path=reg,
+        )
+        self.assertEqual(
+            status["state"],
+            "EXACT_PDF_PARTIALLY_PUBLISHED_AS_STRUCTURED_FACTS_AND_VISUALS",
+        )
+        self.assertEqual(status["existing_structured_knowledge"], 1)
+        self.assertEqual(status["available_visual_assets"], 1)
+        self.assertFalse(status["full_page_indexed_in_rave_pack001"])
+
     def test_missing_png_is_blocked_and_reported(self):
         self.image.unlink()
         report = self.audit()

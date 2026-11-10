@@ -526,7 +526,8 @@ def audit_expert_image_links(install_root: Path, expert_path: Path) -> dict[str,
 
 
 def inspect_supplemental_source(
-    extra: dict[str, Any], install_root: Path, expert_path: Path
+    extra: dict[str, Any], install_root: Path, expert_path: Path,
+    *, registry_path: Path | None = None,
 ) -> dict[str, Any]:
     """Differentiate a known partially published manual from an absent PDF.
 
@@ -534,8 +535,9 @@ def inspect_supplemental_source(
     separate verified source streams and must never be made to match a RAVE
     document by filename or coincidental page count.
     """
-    registry_path = (Path(__file__).resolve().parents[2] /
-                     "data" / "verified_supplemental_sources.json")
+    if registry_path is None:
+        registry_path = (Path(__file__).resolve().parents[2] /
+                         "data" / "verified_supplemental_sources.json")
     status: dict[str, Any] = {"state": "UNREGISTERED_ADDITIONAL_PDF"}
     if not registry_path.is_file():
         status["state"] = "SOURCE_REGISTRY_MISSING"
@@ -580,13 +582,17 @@ def inspect_supplemental_source(
         status["declared_visual_assets"] = 0
         status["available_visual_assets"] = 0
     if expert_path.is_file():
-        with _readonly_sqlite(expert_path) as conn:
-            rows = conn.execute(
-                "SELECT COUNT(*) FROM mems_knowledge_item "
-                "WHERE knowledge_key LIKE ?", 
-                (match["structured_knowledge_prefix"] + "%",),
-            ).fetchone()[0]
-            status["existing_structured_knowledge"] = rows
+        try:
+            with _readonly_sqlite(expert_path) as conn:
+                rows = conn.execute(
+                    "SELECT COUNT(*) FROM mems_knowledge_item "
+                    "WHERE knowledge_key LIKE ?",
+                    (match["structured_knowledge_prefix"] + "%",),
+                ).fetchone()[0]
+                status["existing_structured_knowledge"] = rows
+        except (sqlite3.Error, OSError) as exc:
+            status["existing_structured_knowledge"] = 0
+            status["error"] = str(exc)
     else:
         status["existing_structured_knowledge"] = 0
     existing = status["existing_structured_knowledge"]
