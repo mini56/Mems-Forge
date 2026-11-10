@@ -1,0 +1,68 @@
+name: MEMS Forge - Auditer un vrai PDF du depot
+
+on:
+  push:
+    branches:
+      - feature/source-evidence-validation-20261110
+    paths:
+      - 'src/mems_forge/source_validation.py'
+      - 'src/mems_forge/document_pack.py'
+      - '.github/workflows/real-pdf-source-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-real-pdf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Recuperer les originaux PDF Git LFS
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Installer MEMS Forge
+        run: python -m pip install .
+      - name: Verifier le PDF original puis chaque bloc source en SQLite
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from mems_forge.document_pack import build_document_pack
+          from mems_forge.source_validation import write_source_audit
+          sources = sorted(path for path in Path("depot").rglob("*")
+                           if path.is_file() and path.suffix.lower() == ".pdf")
+          if not sources:
+              raise SystemExit("REAL_PDF_NOT_FOUND")
+          for index, source in enumerate(sources, 1):
+              with source.open("rb") as stream:
+                  if stream.read(4) != b"%PDF":
+                      raise SystemExit(f"LFS_SOURCE_NOT_DOWNLOADED: {source}")
+              pack = Path("out/private-candidates") / f"source-{index:04d}.zip"
+              build_document_pack(source, pack)
+              report = write_source_audit(
+                  pack, Path("out/source-audits") / f"source-{index:04d}.json"
+              )
+              print(json.dumps({
+                  "source": str(source), "pages": report["pages_checked"],
+                  "native_parity": report["native_source_parity_ok"],
+                  "review_items": len(report["reviews"]),
+                  "release_authorized": report["approved_for_release"],
+              }, ensure_ascii=False))
+              if not report["native_source_parity_ok"]:
+                  raise SystemExit(f"REAL_PDF_SOURCE_PARITY_FAILED: {source}")
+          PY
+      - name: Publier les rapports de verification uniquement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-source-audits-${{ github.run_id }}
+          path: out/source-audits/
+          if-no-files-found: warn
+          retention-days: 14
