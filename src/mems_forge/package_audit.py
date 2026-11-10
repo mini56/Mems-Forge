@@ -144,9 +144,32 @@ def inspect_sqlite(path: Path) -> dict[str, Any]:
                     for row in database.execute("SELECT * FROM ravemems_document LIMIT 200")
                 ]
             if "ravemems_page" in names:
-                info["page_table_columns"] = [
+                columns = [
                     row[1] for row in database.execute("PRAGMA table_info(ravemems_page)")
                 ]
+                info["page_table_columns"] = columns
+                if {"revision_key", "physical_page"} <= set(columns):
+                    # A global page count can hide an omitted page and a
+                    # duplicated neighbour. Record the exact set for every
+                    # physical document revision.
+                    info["physical_page_sets_by_revision"] = {}
+                    info["page_extraction_status_by_revision"] = {}
+                    rows = database.execute(
+                        "SELECT revision_key,physical_page" +
+                        (",extraction_status" if "extraction_status" in columns else "") +
+                        " FROM ravemems_page ORDER BY revision_key,physical_page"
+                    )
+                    for row in rows:
+                        revision = str(row[0])
+                        info["physical_page_sets_by_revision"].setdefault(
+                            revision, []
+                        ).append(row[1])
+                        if "extraction_status" in columns:
+                            status_label = str(row[2] or "UNSPECIFIED")
+                            by_status = info[
+                                "page_extraction_status_by_revision"
+                            ].setdefault(revision, {})
+                            by_status[status_label] = by_status.get(status_label, 0) + 1
             if "memslibrary_search" in names:
                 columns = {
                     row[1] for row in database.execute(
@@ -534,14 +557,42 @@ def _pack_comparison(originals: dict[str, Any], pack: dict[str, Any]) -> dict[st
         if key and key not in used:
             used.add(key)
             indexed_pages = pack.get("pages_by_document", {}).get(key)
-            source_pages = pack.get("source_pages_by_document", {}).get(key)
+            revision_candidates = [
+                meta for meta in pack.get("revision_metadata", [])
+                if meta.get("table") == "ravemems_document_revision"
+                and meta.get("document_key") == key
+                and str(meta.get("source_sha256") or "").lower() ==
+                    str(row.get("sha256") or "").lower()
+            ]
+            revision = revision_candidates[0] if len(revision_candidates) == 1 else {}
+            revision_key = revision.get("revision_key")
+            page_set = pack.get("physical_page_sets_by_revision", {}).get(
+                revision_key
+            ) if revision_key else None
+            total = row.get("pages")
+            expected = set(range(1, total+1)) if isinstance(total, int) else set()
+            actual = {int(p) for p in page_set if isinstance(p, int)} if page_set is not None else set()
+            gaps = sorted(expected - actual) if page_set is not None else []
+            extras = sorted(actual - expected) if page_set is not None else []
+            coverage = (
+                "UNVERIFIED" if page_set is None or not isinstance(total, int) else
+                "COMPLETE_PAGE_SET" if actual == expected and len(page_set) == total else
+                "INCOMPLETE_PAGE_SET"
+            )
             matched.append({
                 "pdf": row["path"], "document_key": key,
-                "proof": method, "original_pages": row["pages"],
+                "revision_key": revision_key,
+                "proof": method, "original_pages": total,
                 "pages_in_search_index": indexed_pages,
-                "pages_in_source_table": source_pages,
-                "source_page_coverage": "UNVERIFIED" if source_pages is None or row["pages"] is None
-                    else "COMPLETE_COUNT" if source_pages == row["pages"] else "COUNT_MISMATCH",
+                "pages_in_source_table": len(page_set) if page_set is not None else None,
+                "missing_physical_pages": gaps,
+                "unexpected_physical_pages": extras,
+                "source_page_coverage": coverage,
+                "extraction_status_counts": (
+                    pack.get("page_extraction_status_by_revision", {}).get(
+                        revision_key, {}
+                    ) if revision_key else {}
+                ),
             })
         else:
             unmatched.append({
@@ -554,6 +605,13 @@ def _pack_comparison(originals: dict[str, Any], pack: dict[str, Any]) -> dict[st
         "unmatched_count": len(unmatched),
         "pack_keys_without_source_identity": sorted(set(pack_names) - used),
         "verified_original_pages": sum(x.get("original_pages") or 0 for x in matched),
+        "physically_verified_pages": sum(
+            x.get("original_pages") or 0 for x in matched
+            if x["source_page_coverage"] == "COMPLETE_PAGE_SET"
+        ),
+        "complete_physical_page_sets": sum(
+            x["source_page_coverage"] == "COMPLETE_PAGE_SET" for x in matched
+        ),
         "original_pages_without_identity": sum(x.get("original_pages") or 0 for x in unmatched),
         "source_total_pages": originals["total_pages"],
         "pack_total_page_rows": pack.get("tables", {}).get("ravemems_page", 0),
@@ -605,6 +663,14 @@ def audit_install(
         blockers.append("ORIGINAL_MANIFEST_EMPTY")
     if comparison["unmatched"]:
         blockers.append(f"PDF_NOT_MAPPED_TO_PACK:{len(comparison['unmatched'])}")
+    incomplete_page_sets = [
+        item for item in comparison["matched"]
+        if item["source_page_coverage"] == "INCOMPLETE_PAGE_SET"
+    ]
+    if incomplete_page_sets:
+        blockers.append(
+            "PACK_PDF_PHYSICAL_PAGES_INCOMPLETE:" + str(len(incomplete_page_sets))
+        )
     if not package["manifest_present"]:
         blockers.append("REFERENCE_MANIFEST_MISSING")
     if package.get("error"):
@@ -643,7 +709,7 @@ def audit_install(
 
     unverified = []
     if comparison["matched"] and any(
-        x["source_page_coverage"] != "COMPLETE_COUNT" for x in comparison["matched"]
+        x["source_page_coverage"] != "COMPLETE_PAGE_SET" for x in comparison["matched"]
     ):
         unverified.append("SOURCE_PAGE_COVERAGE_NOT_PROVEN")
     # A clean file inventory is NOT a semantic review or a proof that each
@@ -686,8 +752,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Documents reliés au Pack001 : **{len(mapping['matched'])}/{o['expected']}**",
         f"Documents non reliés : **{mapping['unmatched_count']}**",
         f"Pages originales sans correspondance prouvée : **{mapping['original_pages_without_identity']}**",
-        f"Pages présentes dans la table du pack : **{mapping['pack_total_page_rows']}** "
-        "(égalité de compte ≠ preuve d'identité)",
+        f"Pages présentes dans la table du pack : **{mapping['pack_total_page_rows']}**",
+        f"Pages physiques vérifiées une à une : **{mapping['physically_verified_pages']}/{o['total_pages']}**",
+        f"PDF avec toutes les pages physiques vérifiées : **{mapping['complete_physical_page_sets']}/{o['expected']}**",
         f"Images installées : **{img['available_images']}/{img['expected_images']}**",
         f"Images contrôlées par SHA-256 : **{img['sha256_verified']}**",
         f"Références images de la base experte résolues : **{image_links['verified']}/{image_links['total']}**",
