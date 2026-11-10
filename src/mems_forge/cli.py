@@ -37,7 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
         "tester",
         help="Search technical SQLite bases directly, without a language model",
     )
-    tester.add_argument("--db", type=Path, required=True)
+    tester.add_argument("--db", type=Path,
+                        help="Single SQLite database; omit to search both installed databases")
     tester.add_argument("--query", required=True)
     tester.add_argument("--limit", type=int, default=20)
     tester.add_argument("--install-root", type=Path)
@@ -77,11 +78,19 @@ def main() -> int:
         return 2 if gate["blockers"] else 0
 
     if args.command == "tester":
-        from .db_tester import search_database
+        from .db_tester import search_database, search_installed_databases
 
-        result = search_database(
-            args.db, args.query, limit=args.limit, installed_root=args.install_root
-        )
+        if args.db is None and args.install_root is None:
+            parser = build_parser()
+            parser.error("tester: specify --db or --install-root")
+        if args.db is None:
+            result = search_installed_databases(
+                args.install_root, args.query, limit=args.limit
+            )
+        else:
+            result = search_database(
+                args.db, args.query, limit=args.limit, installed_root=args.install_root
+            )
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
         return 2 if result["errors"] else 0
 

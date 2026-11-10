@@ -177,6 +177,43 @@ class InstalledCorpusAuditTest(unittest.TestCase):
         self.assertTrue(result["results"][0]["source_file_found"])
         self.assertTrue(result["results"][0]["source_file"].endswith(".png"))
 
+    def test_symbolic_rave_image_reference_uses_manifest_not_guessed_filename(self):
+        expert = self.installed / "database" / "expert" / "ia_mems_reference_r20.sqlite"
+        reference = self.installed / "database" / "reference"
+        manifest_path = reference / "manifest.json"
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        data["visual_assets"]["rave:TEST990e:2"] = {
+            "path": "images/rave/TEST990e_PDF_002.png",
+            "sha256": file_sha256(self.image),
+        }
+        manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        with sqlite3.connect(expert) as db:
+            db.execute("UPDATE mems_knowledge_item SET image_ref='TEST990e:2'")
+        from mems_forge.package_audit import resolve_image_reference
+        linked = resolve_image_reference(self.installed, "TEST990e:2")
+        self.assertEqual(linked["status"], "OK")
+        self.assertTrue(linked["path"].endswith(".png"))
+        result = search_database(expert, "Lambda", installed_root=self.installed)
+        self.assertTrue(result["results"][0]["source_file_found"])
+        audit = self.audit()
+        self.assertEqual(audit["knowledge_image_references"]["total"], 1)
+        self.assertEqual(audit["knowledge_image_references"]["verified"], 1)
+
+    def test_missing_symbolic_image_reference_is_a_blocker(self):
+        expert = self.installed / "database" / "expert" / "ia_mems_reference_r20.sqlite"
+        with sqlite3.connect(expert) as db:
+            db.execute("UPDATE mems_knowledge_item SET image_ref='NOT_LISTED:42'")
+        result = self.audit()
+        self.assertIn("EXPERT_IMAGE_REFERENCES_NOT_OPENABLE:1",
+                      result["publication_gate"]["blockers"])
+
+    def test_combined_database_query_does_not_miss_expert_only_answer(self):
+        from mems_forge.db_tester import search_installed_databases
+        result = search_installed_databases(self.installed, "Lambda", limit=15)
+        self.assertGreaterEqual(len(result["bases"]), 2)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["results"][0]["source_database"], "expert_database")
+
     def test_outside_reference_path_rejected(self):
         reference = self.installed / "database" / "reference"
         self.assertIsNone(_safe_file(reference, "../../private.pdf"))
