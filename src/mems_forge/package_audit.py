@@ -525,6 +525,81 @@ def audit_expert_image_links(install_root: Path, expert_path: Path) -> dict[str,
     return findings
 
 
+def inspect_supplemental_source(
+    extra: dict[str, Any], install_root: Path, expert_path: Path
+) -> dict[str, Any]:
+    """Differentiate a known partially published manual from an absent PDF.
+
+    Pack001 is the fixed 47-PDF RAVE pack. Other supplied PDFs belong to
+    separate verified source streams and must never be made to match a RAVE
+    document by filename or coincidental page count.
+    """
+    registry_path = (Path(__file__).resolve().parents[2] /
+                     "data" / "verified_supplemental_sources.json")
+    status: dict[str, Any] = {"state": "UNREGISTERED_ADDITIONAL_PDF"}
+    if not registry_path.is_file():
+        status["state"] = "SOURCE_REGISTRY_MISSING"
+        return status
+    try:
+        docs = json.loads(registry_path.read_text(encoding="utf-8"))["documents"]
+    except (ValueError, OSError, KeyError) as exc:
+        status["state"] = "SOURCE_REGISTRY_INVALID"
+        status["error"] = str(exc)
+        return status
+    match = next((
+        item for item in docs
+        if extra.get("sha256") == item.get("expected_sha256")
+        and extra.get("pages") == item.get("physical_pages")
+    ), None)
+    if match is None:
+        return status
+    name = match["document"]
+    status.update({
+        "state": "EXACT_SOURCE_FOUND_IN_SUPPLEMENTARY_REGISTRY",
+        "document": name,
+        "document_sha256_verified": True,
+        "expected_pages": match["physical_pages"],
+        "source_audit": match["source_provenance"],
+        "expected_structured_knowledge": match["expected_existing_structured_knowledge"],
+        "expected_visual_pages": match["expected_existing_selected_visual_pages"],
+        "full_page_indexed_in_rave_pack001": False,
+    })
+    manifest_file = install_root / "database" / "reference" / "manifest.json"
+    if manifest_file.is_file():
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        assets = [
+            (key, value) for key, value in manifest.get("visual_assets", {}).items()
+            if isinstance(value, dict) and value.get("document") == name
+        ]
+        status["declared_visual_assets"] = len(assets)
+        status["available_visual_assets"] = sum(
+            1 for key, value in assets
+            if resolve_image_reference(install_root, key, manifest=manifest)["status"] == "OK"
+        )
+    else:
+        status["declared_visual_assets"] = 0
+        status["available_visual_assets"] = 0
+    if expert_path.is_file():
+        with _readonly_sqlite(expert_path) as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM mems_knowledge_item "
+                "WHERE knowledge_key LIKE ?", 
+                (match["structured_knowledge_prefix"] + "%",),
+            ).fetchone()[0]
+            status["existing_structured_knowledge"] = rows
+    else:
+        status["existing_structured_knowledge"] = 0
+    existing = status["existing_structured_knowledge"]
+    images = status["available_visual_assets"]
+    if (existing == match["expected_existing_structured_knowledge"]
+            and images == match["expected_existing_selected_visual_pages"]):
+        status["state"] = "EXACT_PDF_PARTIALLY_PUBLISHED_AS_STRUCTURED_FACTS_AND_VISUALS"
+    else:
+        status["state"] = "SUPPLEMENTARY_PDF_INTEGRATION_DISCREPANCY"
+    status["full_482_page_search_exhaustiveness"] = "NOT_YET_PROVEN"
+    return status
+
+
 def _source_to_pack_key(source: dict[str, Any], pack: dict[str, Any]) -> tuple[str | None, str]:
     """Only explicit names or independently verifiable SHA-256 identities.
 
@@ -680,6 +755,9 @@ def audit_install(
         key, proof = _source_to_pack_key(extra, databases["memslibrary_pack"])
         extra["document_key"] = key
         extra["mapping_proof"] = proof
+        extra["supplementary_integration"] = inspect_supplemental_source(
+            extra, install_root, locations["expert_database"]
+        )
 
     blockers: list[str] = []
     blockers.extend(original["issues"])
@@ -735,11 +813,34 @@ def audit_install(
         )
     if any(item.get("error") for item in extra_pdfs):
         blockers.append("ADDITIONAL_PDF_INPUT_UNREADABLE")
-    if extra_pdfs and any(not item.get("document_key") for item in extra_pdfs):
+    unregistered_extra = [
+        item for item in extra_pdfs
+        if not item.get("document_key") and item["supplementary_integration"]["state"]
+        not in {
+            "EXACT_PDF_PARTIALLY_PUBLISHED_AS_STRUCTURED_FACTS_AND_VISUALS",
+            "SUPPLEMENTARY_PDF_INTEGRATION_DISCREPANCY",
+        }
+    ]
+    if unregistered_extra:
+        blockers.append("ADDITIONAL_PDFS_NOT_MAPPED_TO_PACK:" + str(len(unregistered_extra)))
+    known_partial = [
+        item for item in extra_pdfs
+        if item["supplementary_integration"]["state"] ==
+        "EXACT_PDF_PARTIALLY_PUBLISHED_AS_STRUCTURED_FACTS_AND_VISUALS"
+    ]
+    for item in known_partial:
+        # Existing 91 facts and 40 selected illustrations do not prove that
+        # each of the 482 original PDF pages is searchable or present as text.
         blockers.append(
-            "ADDITIONAL_PDFS_NOT_MAPPED_TO_PACK:" +
-            str(sum(not item.get("document_key") for item in extra_pdfs))
+            "SUPPLEMENTARY_FULL_PDF_SEARCH_NOT_PUBLISHED:" +
+            item["supplementary_integration"]["document"]
         )
+    for item in extra_pdfs:
+        if item["supplementary_integration"]["state"] == "SUPPLEMENTARY_PDF_INTEGRATION_DISCREPANCY":
+            blockers.append(
+                "SUPPLEMENTARY_PDF_EXISTING_INTEGRATION_INCOMPLETE:" +
+                item["supplementary_integration"]["document"]
+            )
 
     unverified = []
     if comparison["matched"] and any(
@@ -810,6 +911,16 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(f"- {s}" for s in gate["blockers"]) if gate["blockers"] else lines.append("- Aucun écart technique bloquant détecté")
     lines.extend(["", "## Contrôles restant à réaliser", ""])
     lines.extend(f"- {s}" for s in gate["not_yet_proven"])
+    lines.extend(["", "## PDF supplementaires fournis", ""])
+    for extra in report["other_pdfs"]:
+        supplement = extra.get("supplementary_integration", {})
+        lines.append(
+            f"- {extra.get('file')}: {extra.get('pages')} pages, "
+            f"identité source {supplement.get('state', 'INCONNU')}; "
+            f"faits techniques {supplement.get('existing_structured_knowledge', 0)}, "
+            f"illustrations {supplement.get('available_visual_assets', 0)}; "
+            f"indexation de toutes les pages : non démontrée"
+        )
     lines.extend(["", "## Documents source et correspondance avec Pack001", ""])
     matched = {row["pdf"]: row for row in mapping["matched"]}
     for d in o["records"]:

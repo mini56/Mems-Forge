@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "title": "Sources PDF additionnelles suivies séparément du corpus RAVE original des 47 documents",
+  "documents": [
+    {
+      "document": "AKM7169ENG",
+      "expected_sha256": "c8bbb30d7d5a52932e7f92723ba5dc70520012ac3ceac21d19ab0a39b4d4c4e0",
+      "physical_pages": 482,
+      "source_name": "Mini Repair Manual 92-96, AKM7169ENG, Rover Group Ltd (1993)",
+      "source_provenance": "database/reference/audits/akm7169_1870_full_reintegration_audit.md",
+      "structured_knowledge_prefix": "KNOW-AKM7169-",
+      "expected_existing_structured_knowledge": 91,
+      "expected_existing_selected_visual_pages": 40,
+      "pack001_scope": "RAVE_ORIGINAL_47_ONLY",
+      "full_document_publication": "NOT_PROVEN"
+    }
+  ]
+}
