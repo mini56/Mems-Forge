@@ -94,6 +94,17 @@ def process_one_document(pdf: Path, output_root: Path) -> dict:
     postprocess_full_audit(audit_root)
     pack_root.mkdir(parents=True, exist_ok=True)
     built = build_document_pack(pdf, target, ocr_root=audit_root / "ocr")
+    # Source parity is compulsory for any candidate produced by the depot.
+    # It does not grant semantic validation or authorize publication.
+    from .source_validation import write_source_audit
+    source_audit = write_source_audit(
+        target, audit_root / "source_validation.json"
+    )
+    if not source_audit["native_source_parity_ok"]:
+        target.unlink(missing_ok=True)
+        raise ValueError("SOURCE_PDF_TO_SQLITE_PARITY_FAILED: " +
+                         ",".join(issue["code"] for issue in source_audit["issues"]))
+
     manifest = built["manifest"]
     if manifest["counts"]["ocr_pages"] != manifest["source"]["pages"]:
         target.unlink(missing_ok=True)
@@ -106,6 +117,9 @@ def process_one_document(pdf: Path, output_root: Path) -> dict:
         "pages": manifest["source"]["pages"],
         "ocr_pages": manifest["counts"]["ocr_pages"],
         "pack_sha256": sha256_file(target),
+        "source_parity_verified": True,
+        "source_review_items": len(source_audit["reviews"]),
+        "source_validation_report": str(audit_root / "source_validation.json"),
         "approved_for_ai": False,
     }
 
