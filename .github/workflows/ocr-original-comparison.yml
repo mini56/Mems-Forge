@@ -94,6 +94,24 @@ jobs:
                       raise SystemExit("COMPONENT_NINE_DESCRIPTION_NOT_RECOVERED")
                   if "Purge valve" not in recovered["candidate_text"]:
                       raise SystemExit("COMPONENT_EIGHTEEN_NOT_RECOVERED")
+                  expected = [
+                      "1. Oxygen sensor", "2. Inertia switch", "3. Fuel pump",
+                      "4. Throttle potentiometer", "5. Fuel pressure regulator",
+                      "6. Injector", "7. Stepper motor",
+                      "8. Intake air temperature sensor",
+                      "9. Manifold PTC heater", "10. Coolant temperature sensor",
+                      "11. Distributor", "12. Crankshaft sensor",
+                      "13. Diagnostic connector", "14. ECU", "15. Relay module",
+                      "16. Ignition coil", "17. Oxygen sensor relay",
+                      "18. Purge valve", "19. Charcoal canister",
+                  ]
+                  actual = [
+                      line.strip() for line in
+                      recovered["candidate_text"].splitlines()
+                      if line.strip() and line.strip()[0].isdigit()
+                  ]
+                  if actual != expected:
+                      raise SystemExit("ORIGINAL_19_COMPONENT_LABELS_NOT_EXACT")
           PY
       - name: Conserver les rapports seulement
         if: always()
