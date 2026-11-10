@@ -38,7 +38,8 @@ def _hash(data: bytes) -> str:
 
 
 def build_document_pack(
-    pdf_path: Path, output_path: Path, *, reader_root: Path | None = None
+    pdf_path: Path, output_path: Path, *, reader_root: Path | None = None,
+    ocr_root: Path | None = None
 ) -> dict:
     """Produce a candidate pack only, never modify the published database."""
     pdf_path = Path(pdf_path)
@@ -65,7 +66,9 @@ def build_document_pack(
         initialize_database(database_file, __version__)
         revision = "REV_" + source_sha
         document = "DOC_" + source_sha[:24]
-        count = {"pages": 0, "blocks": 0, "spans": 0, "image_occurrences": 0, "reviews": 0}
+        count = {"pages": 0, "blocks": 0, "spans": 0, "image_occurrences": 0,
+                 "reviews": 0, "ocr_pages": 0, "ocr_words": 0}
+        ocr_members = {}
         with closing(sqlite3.connect(database_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
             db.execute(
@@ -122,6 +125,58 @@ def build_document_pack(
                      span.get("size"), ix),
                 )
                 count["spans"] += 1
+            db.execute(
+                "CREATE TABLE pack_ocr_pages("
+                "page_id TEXT PRIMARY KEY REFERENCES source_pages(page_id),"
+                "text TEXT NOT NULL,language TEXT,confidence_mean REAL,"
+                "review_required INTEGER NOT NULL,raw_tsv_sha256 TEXT NOT NULL)"
+            )
+            db.execute(
+                "CREATE TABLE pack_ocr_words("
+                "page_id TEXT NOT NULL REFERENCES pack_ocr_pages(page_id),"
+                "word_index INTEGER NOT NULL,text TEXT NOT NULL,confidence REAL,"
+                "left_px INTEGER,top_px INTEGER,width_px INTEGER,height_px INTEGER,"
+                "PRIMARY KEY(page_id,word_index))"
+            )
+            if ocr_root is not None:
+                directory = Path(ocr_root) / source_sha
+                pages_dir = directory / "pages"
+                raw_dir = directory / "raw"
+                for n in range(1, expected_pages + 1):
+                    pagefile = pages_dir / f"page-{n:04d}.json"
+                    if not pagefile.is_file():
+                        raise ValueError(f"Missing verified OCR page {n}")
+                    page_data = json.loads(pagefile.read_text(encoding="utf-8"))
+                    if (page_data.get("source_sha256") != source_sha or
+                            int(page_data.get("page_number", -1)) != n):
+                        raise ValueError(f"OCR provenance mismatch on page {n}")
+                    raw = page_data.get("raw_ocr") or {}
+                    payload = raw_dir / f"page-{n:04d}.tsv.gz"
+                    if not payload.is_file():
+                        raise ValueError(f"OCR TSV source absent for page {n}")
+                    raw_gzip = payload.read_bytes()
+                    if _hash(gzip.decompress(raw_gzip)) != raw.get("sha256"):
+                        raise ValueError(f"OCR TSV evidence hash mismatch on page {n}")
+                    member = f"ocr/page-{n:04d}.tsv.gz"
+                    ocr_members[member] = raw_gzip
+                    page_id = f"{revision}:p{n}"
+                    db.execute(
+                        "INSERT INTO pack_ocr_pages VALUES(?,?,?,?,?,?)",
+                        (page_id, page_data.get("text", ""),
+                         page_data.get("language"),
+                         (page_data.get("confidence") or {}).get("mean"),
+                         int(bool(page_data.get("review_required"))), raw["sha256"]),
+                    )
+                    count["ocr_pages"] += 1
+                    for ix, word in enumerate(page_data.get("words") or []):
+                        db.execute(
+                            "INSERT INTO pack_ocr_words VALUES(?,?,?,?,?,?,?,?)",
+                            (page_id, ix, word.get("text", ""),
+                             word.get("confidence"),
+                             word.get("left"), word.get("top"),
+                             word.get("width"), word.get("height")),
+                        )
+                        count["ocr_words"] += 1
             db.execute(
                 "CREATE TABLE pack_image_occurrences("
                 "revision_id TEXT NOT NULL,page_number INTEGER NOT NULL,"
@@ -184,6 +239,10 @@ def build_document_pack(
             "available_for": ["direct_raw_search", "source_pdf_viewer"],
             "not_approved_for": ["validated_technical_facts", "automatic_ai_answers"],
         }
+        if count["ocr_pages"]:
+            manifest["available_for"].append("direct_ocr_text_search_with_provenance")
+            for member, content in sorted(ocr_members.items()):
+                manifest["members_sha256"][member] = _hash(content)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if output_path.exists():
             raise FileExistsError(f"Pack exists: {output_path}")
@@ -193,6 +252,7 @@ def build_document_pack(
             ) + "\n").encode("utf-8"),
             "source/document.pdf": pdf_bytes,
             "data/knowledge.sqlite": db_bytes,
+            **ocr_members,
         }
         with zipfile.ZipFile(output_path, "x", compression=zipfile.ZIP_DEFLATED,
                              compresslevel=6) as pack:
@@ -212,6 +272,8 @@ def inspect_document_pack(path: Path) -> dict:
     try:
         with zipfile.ZipFile(path, "r") as archive:
             expected = {"manifest.json", "source/document.pdf", "data/knowledge.sqlite"}
+            expected.update(manifest_name for manifest_name in archive.namelist()
+                            if manifest_name.startswith("ocr/"))
             if set(archive.namelist()) != expected:
                 return {"valid": False, "error": "unexpected_or_missing_members"}
             manifest = json.loads(archive.read("manifest.json"))
@@ -219,6 +281,8 @@ def inspect_document_pack(path: Path) -> dict:
                 return {"valid": False, "error": "unknown_format"}
             if manifest.get("format_version") != 1:
                 return {"valid": False, "error": "unknown_format_version"}
+            if set(manifest["members_sha256"]) != expected - {"manifest.json"}:
+                return {"valid": False, "error": "manifest_member_list_mismatch"}
             for member, expected_sha in manifest["members_sha256"].items():
                 if member not in expected or _hash(archive.read(member)) != expected_sha:
                     return {"valid": False, "error": "member_hash_invalid", "member": member}
@@ -230,12 +294,14 @@ def inspect_document_pack(path: Path) -> dict:
                 with closing(sqlite3.connect(db_file)) as db:
                     integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
                     pages = db.execute("SELECT COUNT(*) FROM source_pages").fetchone()[0]
+                    ocr_pages = db.execute("SELECT COUNT(*) FROM pack_ocr_pages").fetchone()[0]
                     metadata = db.execute(
                         "SELECT value FROM database_metadata WHERE key='publication_state'"
                     ).fetchone()
                     if (integrity != "ok" or
                             db.execute("PRAGMA foreign_key_check").fetchall() or
                             pages != manifest["source"]["pages"] or
+                            ocr_pages != manifest["counts"].get("ocr_pages", 0) or
                             metadata is None or metadata[0] != "blocked_semantic_review"):
                         return {"valid": False, "error": "sqlite_validation_failed"}
             return {
