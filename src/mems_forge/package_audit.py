@@ -99,6 +99,28 @@ def inspect_sqlite(path: Path) -> dict[str, Any]:
                     info["tables"][table] = database.execute(
                         f'SELECT COUNT(*) FROM "{table}"'
                     ).fetchone()[0]
+            if "ravemems_document" in names:
+                # Document IDs can be SHA-256-derived, not PDF filenames.
+                # Preserve the pack's own metadata so each alternate name
+                # can be checked against source fingerprints/provenance.
+                info["document_table_columns"] = [
+                    row[1] for row in database.execute(
+                        "PRAGMA table_info(ravemems_document)"
+                    )
+                ]
+                info["document_metadata"] = [
+                    {
+                        field: (value[:500] if isinstance(value, str) else
+                                value if isinstance(value, (int, float, type(None)))
+                                else str(value)[:500])
+                        for field, value in dict(row).items()
+                    }
+                    for row in database.execute("SELECT * FROM ravemems_document LIMIT 200")
+                ]
+            if "ravemems_page" in names:
+                info["page_table_columns"] = [
+                    row[1] for row in database.execute("PRAGMA table_info(ravemems_page)")
+                ]
             if "memslibrary_search" in names:
                 columns = {
                     row[1] for row in database.execute(
@@ -269,23 +291,64 @@ def audit_reference(install_root: Path) -> dict[str, Any]:
     return info
 
 
+def _source_to_pack_key(source: dict[str, Any], pack: dict[str, Any]) -> tuple[str | None, str]:
+    """Only explicit names or independently verifiable SHA-256 identities.
+
+    In the real Pack001, many keys use DOC_PDFSHA256 + 16 hexadecimal digits.
+    Compare to SHA-256 of the *actual* PDF. Never equate documents based on
+    page counts or similar titles.
+    """
+    sha = str(source.get("sha256", "")).upper()
+    stem = normalized_key(Path(source.get("path", source.get("file", ""))).stem)
+    possible: dict[str, str] = {}
+    for key in pack.get("document_keys", []):
+        upper = key.upper()
+        if upper.startswith("DOC_PDFSHA256") and len(upper) > len("DOC_PDFSHA256"):
+            prefix = upper[len("DOC_PDFSHA256"):]
+            if (len(prefix) >= 16 and all(c in "0123456789ABCDEF" for c in prefix)
+                    and sha.startswith(prefix)):
+                possible[key] = "SHA256_PREFIX_OF_ORIGINAL_PDF"
+        if normalized_key(key) == stem:
+            possible[key] = "EXACT_DOCUMENT_NAME"
+
+    for metadata in pack.get("document_metadata", []):
+        key = metadata.get("document_key")
+        if key not in pack.get("document_keys", []):
+            continue
+        # Only metadata fields declaring hash identity, not arbitrary text.
+        for field, value in metadata.items():
+            lower = field.lower()
+            if "sha256" not in lower and "hash" not in lower:
+                continue
+            literal = str(value or "").strip().upper()
+            if len(literal) == 64 and literal == sha:
+                possible[key] = "DOCUMENT_METADATA_EXACT_SHA256"
+            elif len(literal) >= 16 and sha.startswith(literal):
+                possible[key] = "DOCUMENT_METADATA_SHA256_PREFIX"
+        for field, value in metadata.items():
+            if field.lower() in {"source_filename", "pdf_filename", "source_file"}:
+                if normalized_key(str(value)) == stem:
+                    possible.setdefault(key, "DOCUMENT_METADATA_ORIGINAL_FILENAME")
+
+    if len(possible) != 1:
+        return None, "UNMATCHED" if not possible else "AMBIGUOUS"
+    return next(iter(possible.items()))
+
+
 def _pack_comparison(originals: dict[str, Any], pack: dict[str, Any]) -> dict[str, Any]:
     pack_names = pack.get("document_keys", [])
-    normalized = {}
-    for key in pack_names:
-        normalized.setdefault(normalized_key(key), []).append(key)
-    matched = []
-    unmatched = []
+    matched: list[dict[str, Any]] = []
+    unmatched: list[dict[str, Any]] = []
+    used: set[str] = set()
     for row in originals["records"]:
-        stem = normalized_key(Path(row["path"]).stem)
-        matches = normalized.get(stem, [])
-        if len(matches) == 1:
-            key = matches[0]
+        key, method = _source_to_pack_key(row, pack)
+        if key and key not in used:
+            used.add(key)
             indexed_pages = pack.get("pages_by_document", {}).get(key)
             source_pages = pack.get("source_pages_by_document", {}).get(key)
             matched.append({
                 "pdf": row["path"], "document_key": key,
-                "original_pages": row["pages"],
+                "proof": method, "original_pages": row["pages"],
                 "pages_in_search_index": indexed_pages,
                 "pages_in_source_table": source_pages,
                 "source_page_coverage": "UNVERIFIED" if source_pages is None or row["pages"] is None
@@ -293,15 +356,20 @@ def _pack_comparison(originals: dict[str, Any], pack: dict[str, Any]) -> dict[st
             })
         else:
             unmatched.append({
-                "pdf": row["path"], "candidate_keys": matches,
-                "reason": "missing_in_pack" if not matches else "ambiguous_in_pack",
+                "pdf": row["path"], "original_pages": row["pages"],
+                "reason": "source_id_not_proven" if not key else "ambiguous_source_id",
             })
     return {
         "pack_document_keys": pack_names, "count_in_pack": len(pack_names),
         "matched": matched, "unmatched": unmatched,
         "unmatched_count": len(unmatched),
-        "notes": "Identite stricte par nom de PDF / cle documentaire; "
-                 "une egalite de comptes ne prouve pas la couverture.",
+        "pack_keys_without_source_identity": sorted(set(pack_names) - used),
+        "verified_original_pages": sum(x.get("original_pages") or 0 for x in matched),
+        "original_pages_without_identity": sum(x.get("original_pages") or 0 for x in unmatched),
+        "source_total_pages": originals["total_pages"],
+        "pack_total_page_rows": pack.get("tables", {}).get("ravemems_page", 0),
+        "notes": "Verified by source PDF SHA-256 or explicit metadata identity. "
+                 "Matching total document/page counts alone never proves provenance.",
     }
 
 
@@ -332,6 +400,13 @@ def audit_install(
         else:
             extra_pdfs.append({"file": str(extra_pdf_root), "error": "INPUT_ABSENT"})
 
+    # Extra PDF inputs are inventoried separately. They must not be silently
+    # treated as part of the original 47 or as published pack material.
+    for extra in extra_pdfs:
+        key, proof = _source_to_pack_key(extra, databases["memslibrary_pack"])
+        extra["document_key"] = key
+        extra["mapping_proof"] = proof
+
     blockers: list[str] = []
     blockers.extend(original["issues"])
     if original["expected"] < 1:
@@ -361,6 +436,11 @@ def audit_install(
         blockers.append("PACK_SEARCH_EMPTY")
     if any(item.get("error") for item in extra_pdfs):
         blockers.append("ADDITIONAL_PDF_INPUT_UNREADABLE")
+    if extra_pdfs and any(not item.get("document_key") for item in extra_pdfs):
+        blockers.append(
+            "ADDITIONAL_PDFS_NOT_MAPPED_TO_PACK:" +
+            str(sum(not item.get("document_key") for item in extra_pdfs))
+        )
 
     unverified = []
     if comparison["matched"] and any(
@@ -404,6 +484,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Pages des PDF vérifiés : **{o['total_pages']}**",
         f"Documents reliés au Pack001 : **{len(mapping['matched'])}/{o['expected']}**",
         f"Documents non reliés : **{mapping['unmatched_count']}**",
+        f"Pages originales sans correspondance prouvée : **{mapping['original_pages_without_identity']}**",
+        f"Pages présentes dans la table du pack : **{mapping['pack_total_page_rows']}** "
+        "(égalité de compte ≠ preuve d'identité)",
         f"Images installées : **{img['available_images']}/{img['expected_images']}**",
         f"Images contrôlées par SHA-256 : **{img['sha256_verified']}**",
         "",
@@ -427,7 +510,8 @@ def render_markdown(report: dict[str, Any]) -> str:
     matched = {row["pdf"]: row for row in mapping["matched"]}
     for d in o["records"]:
         link = matched.get(d["path"])
-        state = f"pack: {link['document_key']}" if link else "PAS DE CORRESPONDANCE PROUVÉE"
+        state = (f"pack: {link['document_key']} ({link['proof']})"
+                 if link else "PAS DE CORRESPONDANCE PROUVÉE")
         lines.append(
             f"- {d['path']} — {d['status']}, {d['pages']} pages, {state}"
         )
