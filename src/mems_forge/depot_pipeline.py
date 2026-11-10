@@ -77,8 +77,17 @@ def process_one_document(pdf: Path, output_root: Path) -> dict:
     if target.exists():
         verdict = inspect_document_pack(target)
         if verdict.get("valid") and sha == _source_sha_from_pack(target):
+            # Previously created packs must pass today's source validation too.
+            # Never assume an old ZIP is trustworthy merely because it exists.
+            from .source_validation import write_source_audit
+            audit = write_source_audit(target, audit_root / "source_validation.json")
+            if not audit["native_source_parity_ok"]:
+                raise ValueError("EXISTING_CANDIDATE_SOURCE_PARITY_FAILED")
             return {"status": "ALREADY_PRESENT", "source_sha256": sha,
-                    "pack": str(target), "pages": verdict["source_pages"]}
+                    "pack": str(target), "pages": verdict["source_pages"],
+                    "source_parity_verified": True,
+                    "source_review_items": len(audit["reviews"]),
+                    "approved_for_ai": False}
         raise ValueError("An existing full-OCR candidate is invalid or belongs to another PDF")
 
     run_full_document_audit(pdf, audit_root)
