@@ -6,6 +6,7 @@ uncertain interpretation never become approved facts by mere extraction.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import gzip
 import hashlib
 import json
@@ -65,7 +66,7 @@ def build_document_pack(
         revision = "REV_" + source_sha
         document = "DOC_" + source_sha[:24]
         count = {"pages": 0, "blocks": 0, "spans": 0, "image_occurrences": 0, "reviews": 0}
-        with sqlite3.connect(database_file) as db:
+        with closing(sqlite3.connect(database_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
             db.execute(
                 "INSERT INTO documents(document_id,title,document_type) VALUES(?,?,?)",
@@ -226,7 +227,7 @@ def inspect_document_pack(path: Path) -> dict:
             with tempfile.TemporaryDirectory(prefix="mems-forge-verify-") as tmp:
                 db_file = Path(tmp) / "candidate.sqlite"
                 db_file.write_bytes(archive.read("data/knowledge.sqlite"))
-                with sqlite3.connect(db_file) as db:
+                with closing(sqlite3.connect(db_file)) as db:
                     integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
                     pages = db.execute("SELECT COUNT(*) FROM source_pages").fetchone()[0]
                     metadata = db.execute(
