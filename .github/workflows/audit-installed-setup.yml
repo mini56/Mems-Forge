@@ -1,0 +1,114 @@
+name: MEMS Forge - audit corpus et Setup installe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/mems_forge/package_audit.py"
+      - "src/mems_forge/db_tester.py"
+      - "src/mems_forge/cli.py"
+      - "tests/test_package_audit.py"
+      - "data/rave_47_originals.json"
+      - ".github/workflows/audit-installed-setup.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-audit-tests:
+    name: Valider le moteur de controle MEMS Forge
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Installer les tests et le lecteur PDF
+        run: python -m pip install -e . pytest
+      - name: Tester les recherches et les blocages de regressions
+        run: python -m pytest tests -q
+
+  actual-windows-setup:
+    name: Auditer 47 PDF, Pack001 et le vrai Setup 136
+    needs: source-audit-tests
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[audit-full]')
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Sources MEMS Forge
+        uses: actions/checkout@v4
+        with:
+          path: forge
+          lfs: true
+      - name: PDF RAVE originaux immuables avec provenance
+        uses: actions/checkout@v4
+        with:
+          repository: mini56/ECU-Mems-Manager-Session
+          ref: 643de091b474f4e27917a065bdf46d5a0c764276
+          path: session-source
+          lfs: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Installer le controleur independant
+        run: python -m pip install -e ./forge
+      - name: Telecharger le Setup Windows publie
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force download-setup | Out-Null
+          gh release download mems-session-build-136 --repo mini56/ECU-Mems-Manager-Session --pattern 'ECU.MEMS.Manager.SESSION.Setup.exe' --dir download-setup
+          if($LASTEXITCODE -ne 0){throw 'SETUP136_DOWNLOAD_FAILED'}
+          $installer=Get-Item 'download-setup/ECU.MEMS.Manager.SESSION.Setup.exe'
+          if($installer.Length -lt 100MB){throw 'SETUP136_DOWNLOAD_INCOMPLETE'}
+          Write-Host "SETUP136_SIZE=$($installer.Length) SHA256=$((Get-FileHash $installer.FullName -Algorithm SHA256).Hash)"
+      - name: Installer le Setup dans un dossier Windows isole
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $destination=Join-Path $env:RUNNER_TEMP 'MEMS_FORGE_AUDIT_136'
+          if(Test-Path $destination){Remove-Item $destination -Force -Recurse}
+          $installer=(Resolve-Path 'download-setup/ECU.MEMS.Manager.SESSION.Setup.exe').Path
+          $process=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$destination" -Wait -PassThru
+          if($process.ExitCode -ne 0){throw "SETUP136_INSTALL_FAILED_$($process.ExitCode)"}
+          if(-not(Test-Path (Join-Path $destination 'MEMSLibrary_Pack_001/knowledge.sqlite'))){
+            throw 'INSTALLED_PACK001_DATABASE_MISSING'
+          }
+          Write-Host "INSTALLED_SETUP136_ROOT=$destination"
+      - name: Auditer physiquement le Setup et interroger les bases sans IA
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $destination=Join-Path $env:RUNNER_TEMP 'MEMS_FORGE_AUDIT_136'
+          $outDir='forge/out/installed-setup-136'
+          New-Item -ItemType Directory -Force $outDir | Out-Null
+          & python -m mems_forge audit-setup --source-repo session-source --install-root $destination --baseline forge/data/rave_47_originals.json --other-pdfs forge/depot --report-dir $outDir
+          $auditCode=$LASTEXITCODE
+          Set-Content "$outDir/audit_exit_code.txt" "$auditCode"
+          Write-Host "MEMS_FORGE_AUDIT_EXIT=$auditCode"
+          & python -m mems_forge tester --db (Join-Path $destination 'MEMSLibrary_Pack_001/knowledge.sqlite') --query 'lambda' --limit 8 > "$outDir/tester_pack001_lambda.json"
+          if($LASTEXITCODE -ne 0){Write-Host 'MEMS_FORGE_TESTER_PACK001_FAILED'}
+          & python -m mems_forge tester --db (Join-Path $destination 'database/expert/ia_mems_reference_r20.sqlite') --query 'sonde' --limit 8 --install-root $destination > "$outDir/tester_expert_sonde.json"
+          if($LASTEXITCODE -ne 0){Write-Host 'MEMS_FORGE_TESTER_EXPERT_FAILED'}
+      - name: Publier les preuves meme si des donnees manquent
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-audit-real-setup136-${{ github.run_id }}
+          path: forge/out/installed-setup-136/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Bloquer les lacunes de provenance et les fichiers manquants
+        shell: pwsh
+        run: |
+          $file='forge/out/installed-setup-136/audit_exit_code.txt'
+          if(-not(Test-Path $file)){throw 'AUDIT_NON_EXECUTE'}
+          if((Get-Content $file -Raw).Trim() -ne '0'){
+            throw 'MEMS_FORGE_DOCUMENTARY_INTEGRITY_BLOCKED_CHECK_AUDIT_ARTIFACT'
+          }
+          Write-Host 'MEMS_FORGE_TECHNICAL_AUDIT_PASS_SEMANTIC_REVIEW_STILL_REQUIRED'
