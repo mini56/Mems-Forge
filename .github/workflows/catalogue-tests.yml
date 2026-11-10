@@ -2,15 +2,18 @@ name: MEMS Forge — Catalogue candidate regression
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/source-evidence-validation-20261110]
     paths:
       - 'src/mems_forge/catalogue.py'
       - 'src/mems_forge/document_pack.py'
+      - 'src/mems_forge/source_validation.py'
+      - 'src/mems_forge/depot_pipeline.py'
       - 'src/mems_forge/cli.py'
       - 'src/mems_forge/local_update.py'
       - 'tests/test_combined_search.py'
       - 'tests/test_catalogue.py'
       - 'tests/test_document_pack.py'
+      - 'tests/test_source_validation.py'
       - '.github/workflows/catalogue-tests.yml'
   workflow_dispatch:
 
@@ -35,4 +38,4 @@ jobs:
       - name: Install MEMS Forge and pytest
         run: python -m pip install . pytest
       - name: Verify real PDF packs and catalogue safeguards
-        run: python -m pytest tests/test_document_pack.py tests/test_catalogue.py tests/test_combined_search.py -q
+        run: python -m pytest tests/test_document_pack.py tests/test_catalogue.py tests/test_combined_search.py tests/test_source_validation.py -q
