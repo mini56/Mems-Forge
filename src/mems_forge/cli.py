@@ -68,6 +68,15 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--pack", type=Path, required=True)
     stage.add_argument("--store", type=Path, required=True)
 
+    combined = sub.add_parser(
+        "search-all",
+        help="Read existing ECU MEMS references and staged PDF evidence together, never approving raw OCR",
+    )
+    combined.add_argument("--install-root", type=Path, required=True)
+    combined.add_argument("--store", type=Path, required=True)
+    combined.add_argument("--query", required=True)
+    combined.add_argument("--limit", type=int, default=20)
+
     catalog = sub.add_parser(
         "draft-catalogue",
         help="Create a local SHA-256 catalogue of candidate packs; never publishes",
@@ -109,6 +118,14 @@ def main() -> int:
         report = inspect_document_pack(args.path)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["valid"] else 2
+
+    if args.command == "search-all":
+        from .local_update import search_all_sources
+        result = search_all_sources(
+            args.install_root, args.store, args.query, args.limit
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result["errors"] else 0
 
     if args.command in ("draft-catalogue", "verify-catalogue"):
         from .catalogue import write_candidate_catalogue, inspect_candidate_catalogue
