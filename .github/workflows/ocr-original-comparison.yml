@@ -83,6 +83,17 @@ jobs:
                       raise SystemExit("AUTOMATIC_ALTERNATIVE_OCR_NOT_IMPROVING_LIST")
                   if not any(d["code"] == "OCR_MODES_DISAGREE" for d in report["defects"]):
                       raise SystemExit("DIVERGENT_OCR_NOT_FLAGGED")
+                  recovered = report["recovered_list"]
+                  if not recovered:
+                      raise SystemExit("VERTICALLY_COLLAPSED_LIST_NOT_DETECTED")
+                  if not recovered["independent_render_readings_agree"]:
+                      raise SystemExit("LIST_NOT_CROSSCHECKED_AT_200_AND_400_DPI")
+                  if recovered["numbering"]["numbers"] != list(range(1, 20)):
+                      raise SystemExit("SOURCE_HAS_19_COMPONENTS_OCR_NOT_RECOVERED")
+                  if "Manifold PTC heater" not in recovered["candidate_text"]:
+                      raise SystemExit("COMPONENT_NINE_DESCRIPTION_NOT_RECOVERED")
+                  if "Purge valve" not in recovered["candidate_text"]:
+                      raise SystemExit("COMPONENT_EIGHTEEN_NOT_RECOVERED")
           PY
       - name: Conserver les rapports seulement
         if: always()
