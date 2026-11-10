@@ -177,13 +177,33 @@ def _recheck_two_column_regions(
     gutter = _best_gutter(body, width)
     if not (gutter and gutter.get("plausible_two_columns")):
         return None
-    split_pt = gutter["x"] / (dpi / 72.0)
+    split_pixel = int(gutter["x"])
     regions = {}
-    for side, rect in (
-        ("left", pymupdf.Rect(0, 0, split_pt, page.rect.height)),
-        ("right", pymupdf.Rect(split_pt, 0, page.rect.width, page.rect.height)),
+    for side, start_x, end_x in (
+        ("left", 0, split_pixel),
+        ("right", split_pixel, width),
     ):
-        if rect.is_empty or rect.width < page.rect.width * .20:
+        # Crop to the actual OCR text population rather than an entire
+        # column of mostly blank page. On page 92, full-height PSM6 omitted
+        # item 21; tight text geometry restores the final numbered step.
+        source_words = [
+            word for word in words
+            if (word.top >= height * .055 and word.top < height * .94
+                and word.left >= start_x and word.left + word.width <= end_x)
+        ]
+        if len(source_words) >= 10:
+            x0 = max(start_x, min(word.left for word in source_words) - 50)
+            x1 = min(end_x, max(word.left + word.width for word in source_words) + 70)
+            y0 = max(0, min(word.top for word in source_words) - 50)
+            y1 = min(height, max(word.top + word.height for word in source_words) + 70)
+        else:
+            x0, x1, y0, y1 = start_x, end_x, 0, height
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError("INVALID_TIGHT_COLUMN_GEOMETRY")
+        rect = pymupdf.Rect(*[
+            value / (dpi / 72.0) for value in (x0, y0, x1, y1)
+        ])
+        if rect.is_empty or rect.width < page.rect.width * .12:
             raise ValueError("INVALID_COLUMN_GEOMETRY")
         pix = page.get_pixmap(
             matrix=pymupdf.Matrix(dpi / 72.0, dpi / 72.0), clip=rect,
@@ -211,6 +231,7 @@ def _recheck_two_column_regions(
             "numbering": versions[preferred]["numbering"],
             "versions": versions,
             "bbox_pdf": [rect.x0, rect.y0, rect.x1, rect.y1],
+            "crop_basis": "tight_original_pdf_ocr_geometry",
             "approved_for_technical_database": False,
         }
     return {"gutter": gutter, "regions": regions}
