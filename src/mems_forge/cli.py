@@ -18,6 +18,30 @@ def build_parser() -> argparse.ArgumentParser:
     check_cmd = sub.add_parser("check-db", help="Validate a MEMS Forge database")
     check_cmd.add_argument("path", type=Path)
 
+    audit = sub.add_parser(
+        "audit-setup",
+        help="Compare original RAVE PDFs, their index, image files and the actual installed Setup",
+    )
+    audit.add_argument("--source-repo", type=Path, required=True,
+                       help="Checkout of mini56/ECU-Mems-Manager-Session containing rave/")
+    audit.add_argument("--install-root", type=Path, required=True,
+                       help="Directory in which the Windows Setup was actually installed")
+    audit.add_argument("--baseline", type=Path,
+                       default=Path(__file__).resolve().parents[2] /
+                       "data" / "rave_47_originals.json")
+    audit.add_argument("--report-dir", type=Path, default=Path("out/package-audit"))
+    audit.add_argument("--other-pdfs", type=Path,
+                       help="Additional user-supplied PDF directory to inventory and test")
+
+    tester = sub.add_parser(
+        "tester",
+        help="Search technical SQLite bases directly, without a language model",
+    )
+    tester.add_argument("--db", type=Path, required=True)
+    tester.add_argument("--query", required=True)
+    tester.add_argument("--limit", type=int, default=20)
+    tester.add_argument("--install-root", type=Path)
+
     return parser
 
 
@@ -33,6 +57,33 @@ def main() -> int:
         result = validate_database(args.path)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["integrity_ok"] and result["foreign_key_errors"] == 0 else 2
+
+    if args.command == "audit-setup":
+        from .package_audit import audit_install, write_report
+
+        report = audit_install(
+            args.source_repo, args.install_root, args.baseline,
+            extra_pdf_root=args.other_pdfs,
+        )
+        write_report(report, args.report_dir)
+        gate = report["publication_gate"]
+        print(json.dumps({
+            "state": gate["state"], "blockers": gate["blockers"],
+            "source_pdfs": report["source_documents"]["ok"],
+            "image_count": report["reference_images_and_enrichments"]["available_images"],
+            "mapped_to_pack": len(report["document_mapping"]["matched"]),
+            "report_dir": str(args.report_dir),
+        }, indent=2, ensure_ascii=False))
+        return 2 if gate["blockers"] else 0
+
+    if args.command == "tester":
+        from .db_tester import search_database
+
+        result = search_database(
+            args.db, args.query, limit=args.limit, installed_root=args.install_root
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return 2 if result["errors"] else 0
 
     return 1
 
