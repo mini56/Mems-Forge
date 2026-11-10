@@ -17,7 +17,7 @@ import sqlite3
 import tempfile
 import zipfile
 
-from .db_tester import search_database
+from .db_tester import search_database, search_installed_databases
 from .document_pack import inspect_document_pack
 
 _SHA_CHARS = frozenset("0123456789abcdef")
@@ -187,3 +187,46 @@ def search_staged(storage_root: Path, query: str, limit: int = 20) -> dict:
                 "approved_for_ai": False,
             })
     return {"query": query, "count": len(results), "results": results, "errors": errors}
+
+
+def search_all_sources(
+    install_root: Path, storage_root: Path, query: str, limit: int = 20,
+) -> dict:
+    """Read both immutable application references and added raw PDF previews.
+
+    New-source matches stay labelled UNVERIFIED and cannot become automatic
+    AI answers merely because the query matched a source page.
+    """
+    limit = max(1, min(50, limit))
+    existing = search_installed_databases(install_root, query, limit=limit)
+    preview = search_staged(storage_root, query, limit=limit)
+    old_rows = [
+        {"scope": "EXISTING_REFERENCE", "validation": "INSTALLED_REFERENCE",
+         "source_database": row["source_database"], "fields": row["fields"],
+         "source_table": row["source_table"],
+         "approved_for_ai": None}
+        for row in existing["results"]
+    ]
+    new_rows = [
+        {"scope": "DOCUMENT_UPDATE_PREVIEW", **row}
+        for row in preview["results"]
+    ]
+    result_rows = []
+    # Reserve visibility for both sources when a shared query matches both.
+    if old_rows and new_rows and limit >= 2:
+        result_rows.extend([old_rows.pop(0), new_rows.pop(0)])
+    while len(result_rows) < limit and (old_rows or new_rows):
+        if old_rows:
+            result_rows.append(old_rows.pop(0))
+        if new_rows and len(result_rows) < limit:
+            result_rows.append(new_rows.pop(0))
+    return {
+        "query": query,
+        "count": len(result_rows),
+        "results": result_rows,
+        "existing_matches": existing["count"],
+        "preview_matches": preview["count"],
+        "errors": existing["errors"] + preview["errors"],
+        "updates_are_approved": False,
+        "application_databases_modified": False,
+    }
