@@ -5,7 +5,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from .package_audit import _readonly_sqlite, resolve_image_reference
+from .package_audit import _readonly_sqlite, resolve_image_references
 
 # These are existing, independently populated database schemas. A query cannot
 # choose arbitrary SQL identifiers or modify an installed database.
@@ -86,11 +86,20 @@ def search_database(
                     if installed_root is not None:
                         value = entry["fields"].get("image_ref")
                         if value:
-                            resolved = resolve_image_reference(installed_root, value)
-                            entry["source_file_found"] = resolved["status"] == "OK"
-                            entry["image_reference_status"] = resolved["status"]
-                            if resolved["status"] == "OK":
-                                entry["source_file"] = resolved["path"]
+                            parts = resolve_image_references(installed_root, value)
+                            available = [p for p in parts if p["status"] == "OK"]
+                            missing = [p for p in parts if p["status"] != "OK"]
+                            entry["source_file_found"] = bool(parts) and not missing
+                            entry["image_reference_status"] = (
+                                "OK" if not missing else
+                                "PARTIAL" if available else "NOT_RESOLVED"
+                            )
+                            entry["source_files"] = [p["path"] for p in available]
+                            entry["missing_image_parts"] = [
+                                p["reference"] for p in missing
+                            ]
+                            if available:
+                                entry["source_file"] = available[0]["path"]
                     result["results"].append(entry)
                     remaining -= 1
                     if remaining == 0:
