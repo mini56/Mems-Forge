@@ -50,11 +50,33 @@ def build_parser() -> argparse.ArgumentParser:
     corrected.add_argument("--install-root", type=Path, required=True)
     corrected.add_argument("--output", type=Path, required=True)
     corrected.add_argument("--report", type=Path)
+    build = sub.add_parser(
+        "build-pack", help="Build a verified raw PDF candidate; never auto-publish"
+    )
+    build.add_argument("--pdf", type=Path, required=True)
+    build.add_argument("--output", type=Path, required=True)
+    build.add_argument("--reader-root", type=Path)
+    verify = sub.add_parser("verify-pack", help="Verify candidate ZIP and SQLite")
+    verify.add_argument("path", type=Path)
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
+
+    if args.command == "build-pack":
+        from .document_pack import build_document_pack
+        result = build_document_pack(
+            args.pdf, args.output, reader_root=args.reader_root
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "verify-pack":
+        from .document_pack import inspect_document_pack
+        report = inspect_document_pack(args.path)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report["valid"] else 2
 
     if args.command == "init-db":
         path = initialize_database(args.path, __version__)

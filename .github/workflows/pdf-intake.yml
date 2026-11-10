@@ -9,6 +9,9 @@ on:
       - 'depot/*.PDF'
       - 'depot/**/*.pdf'
       - 'depot/**/*.PDF'
+      - 'src/mems_forge/document_pack.py'
+      - 'tools/build_pack_candidates.py'
+      - 'tests/test_document_pack.py'
       - 'src/mems_forge/pdf_reader.py'
       - 'src/mems_forge/full_document_audit.py'
       - 'src/mems_forge/ocr_reader.py'
@@ -79,6 +82,9 @@ jobs:
           MEMS_FORGE_BEFORE_SHA: ${{ github.event.before }}
         run: python tools/process_depot.py
 
+      - name: Build verifiable raw document candidate packs
+        run: python tools/build_pack_candidates.py
+
       - name: Run controlled OCR prototype
         run: python tools/ocr_prototype.py
 
@@ -98,6 +104,7 @@ jobs:
           path: |
             out/intake/
             out/reader/
+            out/candidate_packs/
             out/ocr-prototype/
             out/layout-prototype/
             out/structure-prototype/
