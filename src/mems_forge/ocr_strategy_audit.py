@@ -161,6 +161,61 @@ def _recover_list_with_two_resolutions(
     }
 
 
+def _recheck_two_column_regions(
+    page, words, width: int, height: int, language: str,
+    directory: Path, dpi: int,
+) -> dict | None:
+    """Independently OCR left/right image regions to avoid interleaved steps.
+
+    All coordinates are anchored to the real PDF and the original PSM3 words.
+    A high list score selects an *OCR candidate*, not a technical fact.
+    """
+    body = [
+        asdict(word) for word in words
+        if (word.top >= height * .055 and word.top < height * .94)
+    ]
+    gutter = _best_gutter(body, width)
+    if not (gutter and gutter.get("plausible_two_columns")):
+        return None
+    split_pt = gutter["x"] / (dpi / 72.0)
+    regions = {}
+    for side, rect in (
+        ("left", pymupdf.Rect(0, 0, split_pt, page.rect.height)),
+        ("right", pymupdf.Rect(split_pt, 0, page.rect.width, page.rect.height)),
+    ):
+        if rect.is_empty or rect.width < page.rect.width * .20:
+            raise ValueError("INVALID_COLUMN_GEOMETRY")
+        pix = page.get_pixmap(
+            matrix=pymupdf.Matrix(dpi / 72.0, dpi / 72.0), clip=rect,
+            colorspace=pymupdf.csGRAY, alpha=False,
+        )
+        png = directory / (side + ".png")
+        pix.save(png)
+        versions = {}
+        for psm in (4, 6):
+            candidate = _ocr(png, language, psm)
+            versions[f"psm{psm}"] = {
+                "text": candidate, "numbering": _numbers(candidate),
+            }
+
+        def quality(item):
+            n = item["numbering"]
+            return (n["count"] - len(n["repeats"]) * 3 -
+                    len(n["gaps"]) * 2 + int(n["starts_at_one"]))
+
+        preferred = ("psm6" if quality(versions["psm6"]) >
+                     quality(versions["psm4"]) else "psm4")
+        regions[side] = {
+            "candidate_mode": preferred,
+            "text": versions[preferred]["text"],
+            "numbering": versions[preferred]["numbering"],
+            "versions": versions,
+            "bbox_pdf": [rect.x0, rect.y0, rect.x1, rect.y1],
+            "approved_for_technical_database": False,
+        }
+    return {"gutter": gutter, "regions": regions}
+
+
 def analyze_raster_reading(
     pdf_path: Path, page_number: int, *, language: str = "eng", dpi: int = 300,
 ) -> dict:
@@ -191,52 +246,13 @@ def analyze_raster_reading(
             alternative = _ocr(original_png, language, 4)
             primary_tsv = _ocr(original_png, language, 3, tsv=True)
             words, warnings = _parse_words(primary_tsv, page_number)
-            body = [
-                asdict(word) for word in words
-                if (word.top >= bitmap.height * .055 and
-                    word.top < bitmap.height * .94)
-            ]
-            gutter = _best_gutter(body, bitmap.width)
-            two_columns = bool(gutter and gutter.get("plausible_two_columns"))
-            regions = {}
-            if two_columns:
-                split_pt = gutter["x"] / scale
-                for side, rect in (
-                    ("left", pymupdf.Rect(0, 0, split_pt, page.rect.height)),
-                    ("right", pymupdf.Rect(split_pt, 0, page.rect.width, page.rect.height)),
-                ):
-                    if rect.is_empty or rect.width < page.rect.width * .20:
-                        raise ValueError("INVALID_COLUMN_GEOMETRY")
-                    pix = page.get_pixmap(
-                        matrix=pymupdf.Matrix(scale, scale), clip=rect,
-                        colorspace=pymupdf.csGRAY, alpha=False,
-                    )
-                    png = directory / (side + ".png")
-                    pix.save(png)
-                    # Two independent segmentation modes are necessary:
-                    # page 92's left list gains its first item with PSM6,
-                    # while PSM4 protects the illustrated right column from
-                    # the drawing-text hallucinations observed with PSM6.
-                    versions = {}
-                    for psm in (4, 6):
-                        candidate = _ocr(png, language, psm)
-                        versions[f"psm{psm}"] = {
-                            "text": candidate, "numbering": _numbers(candidate),
-                        }
-                    def quality(item):
-                        n = item["numbering"]
-                        return (n["count"] - len(n["repeats"]) * 3 -
-                                len(n["gaps"]) * 2 +
-                                int(n["starts_at_one"]))
-                    preferred = ("psm6" if quality(versions["psm6"]) >
-                                 quality(versions["psm4"]) else "psm4")
-                    regions[side] = {
-                        "candidate_mode": preferred,
-                        "text": versions[preferred]["text"],
-                        "numbering": versions[preferred]["numbering"],
-                        "versions": versions,
-                        "bbox_pdf": [rect.x0, rect.y0, rect.x1, rect.y1],
-                    }
+            two_column = _recheck_two_column_regions(
+                page, words, bitmap.width, bitmap.height,
+                language, directory, dpi,
+            )
+            gutter = two_column["gutter"] if two_column else None
+            two_columns = two_column is not None
+            regions = two_column["regions"] if two_column else {}
             numbered = {
                 "psm3_whole": _numbers(primary),
                 "psm4_whole": _numbers(alternative),
