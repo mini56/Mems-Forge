@@ -73,6 +73,10 @@ jobs:
                        .get("recovered_list"))
           if not {"left", "right"} <= columns.keys():
               raise SystemExit("PAGE92_COLUMNS_NOT_RECOVERED")
+          if columns["left"]["numbering"]["numbers"] != list(range(1, 22)):
+              raise SystemExit("PAGE92_21_LEFT_STEPS_NOT_RECOVERED")
+          if columns["right"]["numbering"]["numbers"] != list(range(1, 8)):
+              raise SystemExit("PAGE92_7_RIGHT_STEPS_NOT_RECOVERED")
           if (not recovered or
                   not recovered.get("independent_render_readings_agree") or
                   recovered["numbering"]["numbers"] != list(range(1, 20))):
