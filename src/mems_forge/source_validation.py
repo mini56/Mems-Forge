@@ -24,6 +24,14 @@ from .pdf_reader import _iter_text_records
 _TECH_TOKEN = re.compile(r"(?<![\w])[A-Za-z]*\d+[A-Za-z0-9.,/-]*(?![\w])")
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _technical_tokens(text: str) -> Counter:
     # Multiplicity matters: a repeated setting or ECU identifier can be lost.
     return Counter(token.casefold() for token in _TECH_TOKEN.findall(text))
@@ -66,7 +74,7 @@ def audit_source_pack(pack_path: Path) -> dict:
         report["issues"].append(_issue("INVALID_PACK", error=verdict.get("error")))
         return report
 
-    report["pack_sha256"] = hashlib.sha256(pack_path.read_bytes()).hexdigest()
+    report["pack_sha256"] = _sha256_file(pack_path)
     try:
         with zipfile.ZipFile(pack_path) as archive:
             manifest = json.loads(archive.read("manifest.json"))
@@ -182,6 +190,12 @@ def audit_source_pack(pack_path: Path) -> dict:
                         if any(int(b["block_type"]) != 0 for b in expected_blocks):
                             report["reviews"].append(_issue(
                                 "IMAGE_OR_NON_TEXT_BLOCK_REQUIRES_VISUAL_REVIEW", number
+                            ))
+                        # PDF vector drawings can be wiring diagrams without any raster image.
+                        # Their meaning cannot be established by text/OCR matching.
+                        if page.get_drawings():
+                            report["reviews"].append(_issue(
+                                "VECTOR_DRAWINGS_REQUIRE_VISUAL_REVIEW", number
                             ))
                         visual_count = db.execute(
                             "SELECT COUNT(*) FROM pack_image_occurrences "
