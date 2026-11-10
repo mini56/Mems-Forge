@@ -91,6 +91,18 @@ jobs:
           $auditCode=$LASTEXITCODE
           Set-Content "$outDir/audit_exit_code.txt" "$auditCode"
           Write-Host "MEMS_FORGE_AUDIT_EXIT=$auditCode"
+          $auditReport=Get-Content "$outDir/audit_integralite.json" -Raw | ConvertFrom-Json
+          Write-Host "ORIGINAL_PAGES=$($auditReport.source_documents.total_pages)"
+          Write-Host "PACK_PAGES=$($auditReport.document_mapping.pack_total_page_rows)"
+          Write-Host "VERIFIED_PDFS=$($auditReport.document_mapping.matched.Count)"
+          Write-Host "UNMAPPED_PDFS=$($auditReport.document_mapping.unmatched.Count)"
+          Write-Host "PDFS_WITHOUT_IDENTITY=$($auditReport.document_mapping.original_pages_without_identity) pages"
+          Write-Host "PACK_DOCUMENT_METADATA_COLUMNS=$($auditReport.databases.memslibrary_pack.document_table_columns -join ',')"
+          Write-Host "PACK_KEYS_UNMAPPED=$($auditReport.document_mapping.pack_keys_without_source_identity -join ',')"
+          foreach($item in $auditReport.document_mapping.unmatched){
+            Write-Host "UNMAPPED_ORIGINAL $($item.pdf) ($($item.original_pages) pages)"
+          }
+          Get-Content "$outDir/audit_integralite.md" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           & python -m mems_forge tester --db (Join-Path $destination 'MEMSLibrary_Pack_001/knowledge.sqlite') --query 'lambda' --limit 8 > "$outDir/tester_pack001_lambda.json"
           if($LASTEXITCODE -ne 0){Write-Host 'MEMS_FORGE_TESTER_PACK001_FAILED'}
           & python -m mems_forge tester --db (Join-Path $destination 'database/expert/ia_mems_reference_r20.sqlite') --query 'sonde' --limit 8 --install-root $destination > "$outDir/tester_expert_sonde.json"

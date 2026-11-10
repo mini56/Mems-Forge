@@ -125,6 +125,30 @@ class InstalledCorpusAuditTest(unittest.TestCase):
         self.assertTrue(any(x.startswith("ORIGINAL_MISSING:")
                             for x in report["publication_gate"]["blockers"]))
 
+    def test_pack_hash_identity_matches_original_pdf_without_filename(self):
+        original_sha = file_sha256(self.pdf).upper()
+        key = "DOC_PDFSHA256" + original_sha[:16]
+        library = self.installed / "MEMSLibrary_Pack_001" / "knowledge.sqlite"
+        with sqlite3.connect(library) as db:
+            db.execute("UPDATE memslibrary_search SET document_key=?", (key,))
+        report = self.audit()
+        self.assertEqual(report["document_mapping"]["unmatched_count"], 0)
+        self.assertEqual(report["document_mapping"]["matched"][0]["proof"],
+                         "SHA256_PREFIX_OF_ORIGINAL_PDF")
+        self.assertEqual(report["document_mapping"]["verified_original_pages"], 2)
+
+    def test_additional_pdf_not_in_pack_blocks_exhaustiveness_claim(self):
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        with pymupdf.open() as pdf:
+            pdf.new_page()
+            pdf.save(other / "OTHER_482.pdf")
+        report = audit_install(
+            self.source, self.installed, self.baseline, extra_pdf_root=other
+        )
+        self.assertIn("ADDITIONAL_PDFS_NOT_MAPPED_TO_PACK:1",
+                      report["publication_gate"]["blockers"])
+
     def test_pack_document_name_mismatch_not_hidden_by_equal_counts(self):
         library = self.installed / "MEMSLibrary_Pack_001" / "knowledge.sqlite"
         with sqlite3.connect(library) as db:
