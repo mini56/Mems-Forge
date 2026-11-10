@@ -143,8 +143,8 @@ def build_document_pack(
                     "INSERT INTO review_items(review_id,revision_id,page_id,severity,"
                     "reason_code,reason_text,status) VALUES(?,?,?,?,?,?,?)",
                     (item["review_id"], revision, f"{revision}:p{n}",
-                     item["severity"], item["reason_code"],
-                     item.get("reason_text", item.get("reason", "Review required")),
+                     item["severity"], item["code"],
+                     item["reason"],
                      "pending"),
                 )
                 count["reviews"] += 1
