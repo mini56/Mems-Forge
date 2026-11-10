@@ -68,6 +68,18 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--pack", type=Path, required=True)
     stage.add_argument("--store", type=Path, required=True)
 
+    catalog = sub.add_parser(
+        "draft-catalogue",
+        help="Create a local SHA-256 catalogue of candidate packs; never publishes",
+    )
+    catalog.add_argument("--packs", type=Path, required=True)
+    catalog.add_argument("--output", type=Path, required=True)
+    catalog_check = sub.add_parser(
+        "verify-catalogue", help="Verify local catalogue and all referenced candidate ZIPs"
+    )
+    catalog_check.add_argument("--packs", type=Path, required=True)
+    catalog_check.add_argument("--catalogue", type=Path, required=True)
+
     staged = sub.add_parser("list-staged", help="Check all preview document packs")
     staged.add_argument("--store", type=Path, required=True)
 
@@ -97,6 +109,15 @@ def main() -> int:
         report = inspect_document_pack(args.path)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["valid"] else 2
+
+    if args.command in ("draft-catalogue", "verify-catalogue"):
+        from .catalogue import write_candidate_catalogue, inspect_candidate_catalogue
+        if args.command == "draft-catalogue":
+            result = write_candidate_catalogue(args.packs, args.output)
+        else:
+            result = inspect_candidate_catalogue(args.catalogue, args.packs)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if result.get("valid") is False else 0
 
     if args.command in ("stage-pack", "list-staged", "search-staged"):
         from .local_update import stage_document_pack, list_staged, search_staged
