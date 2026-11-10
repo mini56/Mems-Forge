@@ -69,9 +69,13 @@ jobs:
               if page == 92:
                   if report["layout"] != "two_columns":
                       raise SystemExit("TWO_COLUMN_LAYOUT_NOT_IDENTIFIED")
-                  if ("Refit" not in report["regions"]["left"]["text"] or
+                  if ("Clean crankshaft pulley" not in report["regions"]["left"]["text"] or
                           "TIMING CHAIN" not in report["regions"]["right"]["text"]):
                       raise SystemExit("TWO_COLUMN_REGIONAL_READ_FAILED")
+                  if report["regions"]["left"]["numbering"]["numbers"][0] != 1:
+                      raise SystemExit("LEFT_COLUMN_FIRST_STEP_NOT_RECOVERED")
+                  if report["regions"]["right"]["numbering"]["numbers"][0] != 1:
+                      raise SystemExit("RIGHT_COLUMN_FIRST_STEP_NOT_RECOVERED")
               if page == 116:
                   psm3 = report["numbering"]["psm3_whole"]
                   psm4 = report["numbering"]["psm4_whole"]
