@@ -30,6 +30,10 @@ def test_source_pdf_and_sqlite_exact_text_parity(tmp_path: Path):
     assert verdict["pack_integrity_ok"] is True
     assert verdict["native_source_parity_ok"] is True
     assert verdict["pages_checked"] == 1
+    assert verdict["structured_technical_entities"] == 0
+    assert verdict["structured_entities_with_provenance"] == 0
+    assert verdict["applicability_records"] == 0
+    assert any(x["code"] == "NO_STRUCTURED_TECHNICAL_FACTS" for x in verdict["reviews"])
     assert verdict["native_text_pages"] == 1
     assert verdict["issues"] == []
     assert verdict["publication_state"] == "BLOCKED_SEMANTIC_VALIDATION"
