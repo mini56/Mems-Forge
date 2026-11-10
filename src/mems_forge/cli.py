@@ -60,6 +60,23 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Verified full-document OCR pages and source TSV, if available")
     verify = sub.add_parser("verify-pack", help="Verify candidate ZIP and SQLite")
     verify.add_argument("path", type=Path)
+
+    stage = sub.add_parser(
+        "stage-pack",
+        help="Integrity-checked offline preview installation; NEVER changes application or AI",
+    )
+    stage.add_argument("--pack", type=Path, required=True)
+    stage.add_argument("--store", type=Path, required=True)
+
+    staged = sub.add_parser("list-staged", help="Check all preview document packs")
+    staged.add_argument("--store", type=Path, required=True)
+
+    preview = sub.add_parser(
+        "search-staged", help="Find raw and OCR evidence from staged documents, unverified",
+    )
+    preview.add_argument("--store", type=Path, required=True)
+    preview.add_argument("--query", required=True)
+    preview.add_argument("--limit", type=int, default=20)
     return parser
 
 
@@ -80,6 +97,17 @@ def main() -> int:
         report = inspect_document_pack(args.path)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["valid"] else 2
+
+    if args.command in ("stage-pack", "list-staged", "search-staged"):
+        from .local_update import stage_document_pack, list_staged, search_staged
+        if args.command == "stage-pack":
+            result = stage_document_pack(args.pack, args.store)
+        elif args.command == "list-staged":
+            result = list_staged(args.store)
+        else:
+            result = search_staged(args.store, args.query, max(1, min(args.limit, 50)))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2 if isinstance(result, dict) and result.get("errors") else 0
 
     if args.command == "init-db":
         path = initialize_database(args.path, __version__)

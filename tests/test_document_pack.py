@@ -51,6 +51,73 @@ def test_genuine_two_page_pdf_produces_searchable_verified_candidate(pdf, tmp_pa
     assert any(":p1" in row["fields"]["page_id"] for row in result["results"])
 
 
+def test_staging_and_searching_new_pack_does_not_touch_application_db(pdf, tmp_path):
+    from mems_forge.local_update import (
+        stage_document_pack, list_staged, search_staged,
+    )
+    pack = tmp_path / "candidate.zip"
+    store = tmp_path / "appdata"
+    build_document_pack(pdf, pack)
+    other = tmp_path / "ecu_mems_reference.sqlite"
+    other.write_bytes(b"EXISTING_DATABASE_BYTES_MUST_BE_UNCHANGED")
+    result = stage_document_pack(pack, store)
+    assert result["action"] == "INSTALLED_PREVIEW"
+    assert result["pages"] == 2
+    assert other.read_bytes() == b"EXISTING_DATABASE_BYTES_MUST_BE_UNCHANGED"
+    assert len(list_staged(store)) == 1
+    found = search_staged(store, "temperature sensor")
+    assert found["count"] >= 1
+    assert all(not r["approved_for_ai"] for r in found["results"])
+    assert any(str(r["fields"].get("page_id", "")).endswith(":p1")
+               for r in found["results"])
+    repeat = stage_document_pack(pack, store)
+    assert repeat["action"] == "ALREADY_PRESENT"
+
+
+def test_staging_rejects_corrupt_pack_and_unchanged_existing_state(pdf, tmp_path):
+    from mems_forge.local_update import stage_document_pack, list_staged
+    pack = tmp_path / "candidate.zip"
+    store = tmp_path / "updates"
+    build_document_pack(pdf, pack)
+    valid = stage_document_pack(pack, store)
+    corrupted = tmp_path / "corrupted.zip"
+    with zipfile.ZipFile(pack) as a, zipfile.ZipFile(corrupted, "w") as b:
+        for name in a.namelist():
+            content = a.read(name)
+            if name == "source/document.pdf":
+                content += b"tampered"
+            b.writestr(name, content)
+    with pytest.raises(ValueError, match="Rejected damaged"):
+        stage_document_pack(corrupted, store)
+    unchanged = list_staged(store)
+    assert len(unchanged) == 1
+    assert unchanged[0]["pack_sha256"] == valid["pack_sha256"]
+
+
+def test_installed_file_tampering_is_detected(pdf, tmp_path):
+    from mems_forge.local_update import stage_document_pack, list_staged, search_staged
+    pack = tmp_path / "candidate.zip"
+    store = tmp_path / "store"
+    build_document_pack(pdf, pack)
+    result = stage_document_pack(pack, store)
+    source = store / "preview" / result["source_sha256"] / "source" / "document.pdf"
+    source.write_bytes(b"file modified")
+    listed = list_staged(store)
+    assert listed[0]["error"] == "MEMBER_HASH_MISMATCH"
+    assert search_staged(store, "sensor")["count"] == 0
+
+
+def test_stage_does_not_accept_unexpected_archive_members(pdf, tmp_path):
+    from mems_forge.local_update import stage_document_pack
+    pack = tmp_path / "candidate.zip"
+    build_document_pack(pdf, pack)
+    with zipfile.ZipFile(pack, "a") as bundle:
+        bundle.writestr("../../outside.txt", "bad")
+    with pytest.raises(ValueError, match="Rejected damaged"):
+        stage_document_pack(pack, tmp_path / "store")
+    assert not (tmp_path / "outside.txt").exists()
+
+
 def test_corrupted_source_member_fails_integrity(pdf, tmp_path):
     target = tmp_path / "pack.zip"
     build_document_pack(pdf, target)

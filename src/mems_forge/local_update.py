@@ -6,6 +6,8 @@ is required before a document becomes an official update.
 """
 from __future__ import annotations
 
+from contextlib import closing
+
 import hashlib
 import json
 import os
@@ -67,7 +69,10 @@ def validate_installed_preview(path: Path) -> dict:
             file = path.joinpath(*filename.split("/"))
             if not file.is_file() or sha256_file(file) != expected:
                 return {"valid": False, "error": "MEMBER_HASH_MISMATCH", "member": filename}
-        with sqlite3.connect((path / "data" / "knowledge.sqlite").as_uri() + "?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(
+            (path / "data" / "knowledge.sqlite").as_uri() + "?mode=ro",
+            uri=True,
+        )) as db:
             ok = db.execute("PRAGMA integrity_check").fetchone()[0]
             pages = db.execute("SELECT COUNT(*) FROM source_pages").fetchone()[0]
             ocr = db.execute("SELECT COUNT(*) FROM pack_ocr_pages").fetchone()[0]
