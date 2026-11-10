@@ -71,11 +71,21 @@ class InstalledCorpusAuditTest(unittest.TestCase):
                  for page in (1, 2)],
             )
             database.execute(
-                "CREATE TABLE ravemems_page(document_key TEXT, physical_page INTEGER)"
+                "CREATE TABLE ravemems_document_revision("
+                "revision_key TEXT, document_key TEXT, source_sha256 TEXT)"
+            )
+            database.execute(
+                "INSERT INTO ravemems_document_revision VALUES(?,?,?)",
+                ("REV_TEST", "TEST990e", file_sha256(pdf)),
+            )
+            database.execute(
+                "CREATE TABLE ravemems_page("
+                "revision_key TEXT, physical_page INTEGER, extraction_status TEXT)"
             )
             database.executemany(
-                "INSERT INTO ravemems_page VALUES(?,?)",
-                [("TEST990e", 1), ("TEST990e", 2)],
+                "INSERT INTO ravemems_page VALUES(?,?,?)",
+                [("REV_TEST", 1, "native_text"),
+                 ("REV_TEST", 2, "native_text")],
             )
         expert = self.installed / "database" / "expert" / "ia_mems_reference_r20.sqlite"
         expert.parent.mkdir(parents=True)
@@ -106,6 +116,28 @@ class InstalledCorpusAuditTest(unittest.TestCase):
         self.assertEqual(report["publication_gate"]["state"], "REVIEW_REQUIRED")
         self.assertFalse(report["publication_gate"]["blockers"])
         self.assertIn("Pages des PDF", render_markdown(report))
+        mapping = report["document_mapping"]
+        self.assertEqual(mapping["physically_verified_pages"], 2)
+        self.assertEqual(mapping["complete_physical_page_sets"], 1)
+        self.assertEqual(mapping["matched"][0]["source_page_coverage"],
+                         "COMPLETE_PAGE_SET")
+
+    def test_physical_page_duplicate_blocks_even_if_row_count_unchanged(self):
+        library = self.installed / "MEMSLibrary_Pack_001" / "knowledge.sqlite"
+        with sqlite3.connect(library) as db:
+            db.execute("UPDATE ravemems_page SET physical_page=1 WHERE physical_page=2")
+        report = self.audit()
+        self.assertIn("PACK_PDF_PHYSICAL_PAGES_INCOMPLETE:1",
+                      report["publication_gate"]["blockers"])
+        self.assertEqual(report["document_mapping"]["matched"][0]["missing_physical_pages"], [2])
+
+    def test_missing_physical_page_blocks(self):
+        library = self.installed / "MEMSLibrary_Pack_001" / "knowledge.sqlite"
+        with sqlite3.connect(library) as db:
+            db.execute("DELETE FROM ravemems_page WHERE physical_page=2")
+        report = self.audit()
+        self.assertIn("PACK_PDF_PHYSICAL_PAGES_INCOMPLETE:1",
+                      report["publication_gate"]["blockers"])
 
     def test_missing_png_is_blocked_and_reported(self):
         self.image.unlink()
@@ -131,6 +163,7 @@ class InstalledCorpusAuditTest(unittest.TestCase):
         library = self.installed / "MEMSLibrary_Pack_001" / "knowledge.sqlite"
         with sqlite3.connect(library) as db:
             db.execute("UPDATE memslibrary_search SET document_key=?", (key,))
+            db.execute("UPDATE ravemems_document_revision SET document_key=?", (key,))
         report = self.audit()
         self.assertEqual(report["document_mapping"]["unmatched_count"], 0)
         self.assertEqual(report["document_mapping"]["matched"][0]["proof"],
