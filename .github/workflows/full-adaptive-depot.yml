@@ -1,0 +1,99 @@
+name: MEMS Forge - 482 pages OCR adaptatif et pack
+on:
+  push:
+    branches:
+      - feature/source-evidence-validation-20261110
+    paths:
+      - '.github/workflows/full-adaptive-depot.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-original-complet:
+    name: Audit OCR adaptatif, 482 pages reelles et pack SQLite
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - name: Recuperer PDF original et code source
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Installer Tesseract English et dependances
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          python -m pip install . pytest
+      - name: Tests sans modification des bases existantes
+        run: |
+          python -m pytest tests/test_adaptive_coverage.py tests/test_document_pack.py tests/test_source_validation.py tests/test_ocr_strategy_audit.py -q
+      - name: Lire tous les PDF du depot avec extraction adaptative sur chaque page
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          from mems_forge.adaptive_coverage import audit_adaptive_coverage
+          from mems_forge.depot_pipeline import process_one_document
+          from mems_forge.document_pack import inspect_document_pack
+
+          sources = sorted(path for path in Path("depot").rglob("*")
+                           if path.is_file() and path.suffix.lower() == ".pdf")
+          if len(sources) != 1:
+              raise SystemExit(f"EXPECTED_ONE_ORIGINAL_PDF_FOUND_{len(sources)}")
+          pdf = sources[0]
+          with pdf.open("rb") as stream:
+              if stream.read(4) != b"%PDF":
+                  raise SystemExit("MISSING_GIT_LFS_ORIGINAL_PDF")
+          sha = hashlib.sha256(pdf.read_bytes()).hexdigest()
+          result = process_one_document(pdf, Path("out"))
+          report = audit_adaptive_coverage(
+              Path("out/full-audit") / sha / "ocr", sha, result["pages"]
+          )
+          if result["pages"] != 482:
+              raise SystemExit("CORPUS_482_PAGE_COUNT_CHANGED")
+          if not report["every_page_evaluated"] or report["pages_evaluated"] != 482:
+              raise SystemExit("OCR_ADAPTIVE_DID_NOT_EVALUATE_EVERY_PAGE")
+          if result["ocr_pages"] != 482:
+              raise SystemExit("OCR_PAGES_MISSING_FROM_PACK")
+          if result.get("approved_for_ai") is not False:
+              raise SystemExit("UNVALIDATED_OCR_APPROVED_FOR_AI")
+          pack = inspect_document_pack(Path(result["pack"]))
+          if not pack["valid"] or pack["state"] != "CANDIDATE_NOT_VALIDATED":
+              raise SystemExit("PACK_INVALID_OR_PREMATURELY_PUBLISHED")
+          report_file = Path("out/adaptive-482-summary.json")
+          summary = {
+              "source_pages": report["source_pages"],
+              "pages_evaluated": report["pages_evaluated"],
+              "status_counts": report["status_counts"],
+              "issue_counts": report["issue_counts"],
+              "unresolved_pages": report["unresolved_pages"],
+              "source_parity_verified": result["source_parity_verified"],
+              "ocr_accuracy_certified": False,
+              "technical_publication_authorized": False,
+              "pack_state": pack["state"],
+          }
+          report_file.write_text(
+              json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+          )
+          print("MEMS_FORGE_482_PAGE_VERDICT=" +
+                json.dumps(summary, ensure_ascii=False), flush=True)
+          PY
+      - name: Conserver les rapports seulement, sans les PDF ni ZIP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-adaptive-482-${{ github.run_id }}
+          path: |
+            out/adaptive-482-summary.json
+            out/full-audit/*/adaptive_coverage.json
+            out/full-audit/*/audit_summary.json
+            out/full-audit/*/source_validation.json
+          if-no-files-found: warn
+          retention-days: 14
