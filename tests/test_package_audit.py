@@ -134,6 +134,10 @@ class InstalledCorpusAuditTest(unittest.TestCase):
         self.assertEqual(report["document_mapping"]["unmatched_count"], 1)
         self.assertIn("PDF_NOT_MAPPED_TO_PACK:1", report["publication_gate"]["blockers"])
 
+    def test_python_module_entrypoint_is_wired(self):
+        from mems_forge.__main__ import main
+        self.assertTrue(callable(main))
+
     def test_database_tester_returns_provenance_not_ai_text(self):
         library = self.installed / "MEMSLibrary_Pack_001" / "knowledge.sqlite"
         result = search_database(library, "sensor")
