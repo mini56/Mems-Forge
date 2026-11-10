@@ -55,6 +55,112 @@ def _ocr(png: Path, language: str, segmentation: int, *, tsv: bool = False) -> s
     return result.stdout
 
 
+
+def _recover_vertical_list_roi(words, width: int, height: int) -> list[int] | None:
+    """Detect collapsed vertical OCR rows by geometry, never by expected values.
+
+    Example: on a real scanned parts list, PSM3 merged labels 1..10 into one
+    extremely tall token. Its box gives a region to re-read independently.
+    A common printed header/footer is excluded by its geometry.
+    """
+    import statistics
+
+    heights = [int(w.height) for w in words if 4 <= w.height < height * 0.1]
+    if not heights:
+        return None
+    typical = statistics.median(heights)
+    tall = [
+        w for w in words
+        if (w.height >= max(80, typical * 5)
+            and w.width < width * 0.18
+            and w.left < width * 0.55
+            and height * 0.04 < w.top < height * 0.82)
+    ]
+    if not tall:
+        return None
+    trigger = max(tall, key=lambda w: w.height / max(1, w.width))
+    # Extend horizontally to the words belonging to the list, and below the
+    # collapsed rows to include later numbered entries.
+    x0 = max(0, trigger.left - 40)
+    x1 = min(width, max(trigger.left + width * 0.45, x0 + width * 0.32))
+    y0 = max(0, trigger.top - max(40, typical * 2))
+    y1 = min(height * 0.92,
+             trigger.top + trigger.height + max(550, height * 0.16))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return [round(x0), round(y0), round(x1), round(y1)]
+
+
+def _numbered_lines(text: str) -> dict[int, str]:
+    items = {}
+    for line in text.splitlines():
+        hit = _LIST_ITEM.match(line)
+        if hit:
+            label = int(hit.group(1))
+            if label in items:
+                return {}
+            items[label] = line.strip()
+    return items
+
+
+def _recover_list_with_two_resolutions(
+    page, primary_words, image_width: int, image_height: int,
+    language: str, directory: Path, primary_dpi: int,
+) -> dict | None:
+    """Read collapsed list region twice, from the ORIGINAL PDF at 200/400 DPI.
+
+    Only an identical complete sequence AND identical line descriptions is
+    admitted as a cross-checked OCR alternative. This still does not imply
+    semantic or technical approval.
+    """
+    roi = _recover_vertical_list_roi(primary_words, image_width, image_height)
+    if not roi:
+        return None
+    original_scale = primary_dpi / 72.0
+    pdf_rect = pymupdf.Rect(*[coordinate / original_scale for coordinate in roi])
+    if pdf_rect.is_empty:
+        return None
+    variants = {}
+    for dpi in (200, 400):
+        scale = dpi / 72.0
+        pix = page.get_pixmap(
+            matrix=pymupdf.Matrix(scale, scale), clip=pdf_rect,
+            colorspace=pymupdf.csGRAY, alpha=False,
+        )
+        filename = directory / f"collapsed-list-{dpi}.png"
+        pix.save(filename)
+        content = _ocr(filename, language, 6)
+        variants[str(dpi)] = {
+            "text": content, "numbering": _numbers(content),
+            "lines": _numbered_lines(content),
+        }
+    smaller, larger = variants["200"], variants["400"]
+    first = smaller["numbering"]
+    second = larger["numbering"]
+    consistent = (
+        first["starts_at_one"] and second["starts_at_one"]
+        and len(first["numbers"]) >= 5
+        and first["numbers"] == second["numbers"]
+        and not first["repeats"] and not first["gaps"]
+        and not second["repeats"] and not second["gaps"]
+        and smaller["lines"] == larger["lines"]
+        and len(smaller["lines"]) == first["count"]
+    )
+    return {
+        "roi_pdf": [pdf_rect.x0, pdf_rect.y0, pdf_rect.x1, pdf_rect.y1],
+        "roi_source": "vertical_collapsed_ocr_geometry",
+        "resolution_dpi": [200, 400],
+        "numbering": first,
+        "candidate_text": larger["text"],
+        "independent_render_readings_agree": bool(consistent),
+        "validation_state": (
+            "CROSSCHECKED_OCR_ONLY_NOT_TECHNICAL_VALIDATION" if consistent
+            else "OCR_READINGS_CONFLICT_NOT_APPROVED"
+        ),
+        "approved_for_technical_database": False,
+    }
+
+
 def analyze_raster_reading(
     pdf_path: Path, page_number: int, *, language: str = "eng", dpi: int = 300,
 ) -> dict:
@@ -135,6 +241,10 @@ def analyze_raster_reading(
                 "psm3_whole": _numbers(primary),
                 "psm4_whole": _numbers(alternative),
             }
+            recovered_list = _recover_list_with_two_resolutions(
+                page, words, bitmap.width, bitmap.height,
+                language, directory, dpi,
+            )
             defects = []
             for label, report in numbered.items():
                 if report["repeats"] or report["gaps"]:
@@ -163,6 +273,9 @@ def analyze_raster_reading(
             if primary != alternative:
                 defects.append({"code": "OCR_MODES_DISAGREE",
                                 "strategy": "psm3_vs_psm4"})
+            if recovered_list and not recovered_list["independent_render_readings_agree"]:
+                defects.append({"code": "COLLAPSED_LIST_REOCR_CONFLICT",
+                                "strategy": "original_pdf_multi_dpi"})
             return {
                 "format": "mems-forge-ocr-strategy-audit",
                 "version": 1,
@@ -176,6 +289,7 @@ def analyze_raster_reading(
                 "psm4_text": alternative,
                 "numbering": numbered,
                 "regions": regions,
+                "recovered_list": recovered_list,
                 "parse_warnings": warnings,
                 "defects": defects,
                 "approved_for_technical_database": False,
