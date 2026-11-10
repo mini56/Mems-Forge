@@ -199,6 +199,56 @@ class InstalledCorpusAuditTest(unittest.TestCase):
         self.assertEqual(audit["knowledge_image_references"]["total"], 1)
         self.assertEqual(audit["knowledge_image_references"]["verified"], 1)
 
+    def test_symbolic_image_range_expands_and_opens_both_images(self):
+        from mems_forge.package_audit import expand_image_references
+        from mems_forge.db_tester import search_database
+        self.assertEqual(
+            expand_image_references("RCL0194ENG:20.1-20.2"),
+            ["RCL0194ENG:20.1", "RCL0194ENG:20.2"],
+        )
+        self.assertEqual(
+            expand_image_references("RCL0194ENG:20.2,39.1"),
+            ["RCL0194ENG:20.2", "RCL0194ENG:39.1"],
+        )
+        reference = self.installed / "database" / "reference"
+        manifest_path = reference / "manifest.json"
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for number in ("20.1", "20.2"):
+            data["visual_assets"]["rave:TEST990e:" + number] = {
+                "path": "images/rave/TEST990e_PDF_002.png",
+                "sha256": file_sha256(self.image),
+            }
+        manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        expert = self.installed / "database" / "expert" / "ia_mems_reference_r20.sqlite"
+        with sqlite3.connect(expert) as db:
+            db.execute(
+                "UPDATE mems_knowledge_item SET image_ref='TEST990e:20.1-20.2'"
+            )
+        direct = search_database(expert, "Lambda", installed_root=self.installed)
+        row = direct["results"][0]
+        self.assertTrue(row["source_file_found"])
+        self.assertEqual(len(row["source_files"]), 2)
+        self.assertEqual(self.audit()["knowledge_image_references"]["verified"], 1)
+
+    def test_partial_diagram_set_reports_only_the_missing_component(self):
+        reference = self.installed / "database" / "reference"
+        manifest_path = reference / "manifest.json"
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        data["visual_assets"]["rave:TEST990e:20.1"] = {
+            "path": "images/rave/TEST990e_PDF_002.png",
+            "sha256": file_sha256(self.image),
+        }
+        manifest_path.write_text(json.dumps(data), encoding="utf-8")
+        expert = self.installed / "database" / "expert" / "ia_mems_reference_r20.sqlite"
+        with sqlite3.connect(expert) as db:
+            db.execute(
+                "UPDATE mems_knowledge_item SET image_ref='TEST990e:20.1,39.1'"
+            )
+        report = self.audit()
+        unresolved = report["knowledge_image_references"]["unresolved"]
+        self.assertEqual(unresolved[0]["missing_parts"], ["TEST990e:39.1"])
+        self.assertEqual(unresolved[0]["available_parts"], ["TEST990e:20.1"])
+
     def test_missing_symbolic_image_reference_is_a_blocker(self):
         expert = self.installed / "database" / "expert" / "ia_mems_reference_r20.sqlite"
         with sqlite3.connect(expert) as db:

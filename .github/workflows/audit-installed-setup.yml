@@ -101,6 +101,8 @@ jobs:
           Write-Host "PACK_KEYS_UNMAPPED=$($auditReport.document_mapping.pack_keys_without_source_identity -join ',')"
           Write-Host "EXPERT_IMAGE_LINKS_RESOLVED=$($auditReport.knowledge_image_references.verified)/$($auditReport.knowledge_image_references.total)"
           Write-Host "EXPERT_IMAGE_LINK_ISSUES=$($auditReport.knowledge_image_references.unresolved.Count)"
+          Write-Host "EXPERT_MISSING_PARTS=$($auditReport.knowledge_image_references.missing_reference_parts -join ',')"
+          Write-Host "PACK_REVISION_SCHEMA=$($auditReport.databases.memslibrary_pack.revision_schemas | ConvertTo-Json -Compress -Depth 5)"
           foreach($item in $auditReport.document_mapping.unmatched){
             Write-Host "UNMAPPED_ORIGINAL $($item.pdf) ($($item.original_pages) pages)"
           }
