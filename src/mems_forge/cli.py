@@ -61,6 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
     verify = sub.add_parser("verify-pack", help="Verify candidate ZIP and SQLite")
     verify.add_argument("path", type=Path)
 
+    source_audit = sub.add_parser(
+        "audit-source-pack",
+        help="Compare original PDF to indexed text, block uncertain OCR and keep publication disabled",
+    )
+    source_audit.add_argument("path", type=Path)
+    source_audit.add_argument("--report", type=Path)
+
     stage = sub.add_parser(
         "stage-pack",
         help="Integrity-checked offline preview installation; NEVER changes application or AI",
@@ -118,6 +125,13 @@ def main() -> int:
         report = inspect_document_pack(args.path)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["valid"] else 2
+
+    if args.command == "audit-source-pack":
+        from .source_validation import audit_source_pack, write_source_audit
+        report = (write_source_audit(args.path, args.report) if args.report
+                  else audit_source_pack(args.path))
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report["native_source_parity_ok"] else 2
 
     if args.command == "search-all":
         from .local_update import search_all_sources
