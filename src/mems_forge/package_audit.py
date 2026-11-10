@@ -379,10 +379,55 @@ def resolve_image_reference(
     return outcome
 
 
+def expand_image_references(value: str) -> list[str]:
+    """Expand explicit comma-separated diagram ids and short numeric ranges.
+
+    Examples:
+      RCL0194ENG:20.2,39.1 -> RCL0194ENG:20.2 / RCL0194ENG:39.1
+      RCL0194ENG:20.1-20.2 -> RCL0194ENG:20.1 / RCL0194ENG:20.2
+    Do not guess across section boundaries, unknown syntaxes or long ranges.
+    """
+    text = value.strip()
+    parsed = re.fullmatch(
+        r"([A-Za-z0-9_]+):(\d+\.\d+(?:\s*[,;-]\s*\d+\.\d+)*)",
+        text,
+    )
+    if not parsed:
+        return [text] if text else []
+    document, expression = parsed.groups()
+    results: list[str] = []
+    parts = re.split(r"\s*[,;]\s*", expression)
+    for part in parts:
+        interval = re.fullmatch(r"(\d+)\.(\d+)-(\d+)\.(\d+)", part)
+        if interval:
+            start_major, first, end_major, last = map(int, interval.groups())
+            if start_major == end_major and 0 <= last-first <= 12:
+                results.extend(
+                    f"{document}:{start_major}.{n}"
+                    for n in range(first, last+1)
+                )
+            else:
+                results.append(f"{document}:{part}")
+        else:
+            results.append(f"{document}:{part}")
+    return list(dict.fromkeys(results))
+
+
+def resolve_image_references(
+    install_root: Path, expression: str,
+    *, manifest: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        resolve_image_reference(install_root, ref, manifest=manifest)
+        for ref in expand_image_references(expression)
+    ]
+
+
 def audit_expert_image_links(install_root: Path, expert_path: Path) -> dict[str, Any]:
     findings: dict[str, Any] = {
         "total": 0, "verified": 0, "unresolved": [],
         "status_counts": {}, "source": str(expert_path),
+        "resolved_image_parts": 0, "missing_reference_parts": [],
     }
     if not expert_path.is_file():
         return findings
@@ -403,12 +448,16 @@ def audit_expert_image_links(install_root: Path, expert_path: Path) -> dict[str,
             for key, ref in references:
                 ref = str(ref)
                 if ref not in cache:
-                    cache[ref] = resolve_image_reference(
+                    cache[ref] = resolve_image_references(
                         install_root, ref, manifest=manifest,
                     )
-                linked = cache[ref]
+                resolved = cache[ref]
+                found = [link for link in resolved if link["status"] == "OK"]
+                missing = [link for link in resolved if link["status"] != "OK"]
                 findings["total"] += 1
-                status = linked["status"]
+                findings["resolved_image_parts"] += len(found)
+                status = ("OK" if not missing else
+                          "PARTIAL" if found else "NOT_RESOLVED")
                 findings["status_counts"][status] = (
                     findings["status_counts"].get(status, 0) + 1
                 )
@@ -416,8 +465,14 @@ def audit_expert_image_links(install_root: Path, expert_path: Path) -> dict[str,
                     findings["verified"] += 1
                 else:
                     findings["unresolved"].append({
-                        "knowledge_key": key, "image_ref": ref, "status": status,
+                        "knowledge_key": key, "image_ref": ref,
+                        "status": status,
+                        "missing_parts": [x["reference"] for x in missing],
+                        "available_parts": [x["reference"] for x in found],
                     })
+                    findings["missing_reference_parts"].extend(
+                        x["reference"] for x in missing
+                    )
     except (ValueError, OSError, sqlite3.Error) as exc:
         findings["error"] = str(exc)
     return findings
