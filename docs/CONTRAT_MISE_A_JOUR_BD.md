@@ -22,20 +22,25 @@ signale le pack et l'installe dans les données locales, sans réinstaller l'app
 4. **Validation pour publication** : **à terminer**. Contrôles sur OCR, pages,
    schémas, correspondance source, droits de diffusion et approbation explicite
    de chaque pack. Aucun pack non validé ne doit être publié comme connaissance.
-5. **Distribution versionnée indépendante du Setup** : **à terminer**. Créer
-   un catalogue JSON stable, version/identifiant, PDF source, hash SHA-256 du
-   pack, taille, dépendances et date ; publication dans une Release *documentaire*
-   distincte des Releases de l'application.
+5. **Distribution versionnée indépendante du Setup** : **partiellement réalisée**.
+   La commande `draft-catalogue` génère un inventaire JSON déterministe des
+   packs candidats, SHA-256, taille, document source, pages et dépendances.
+   `verify-catalogue` détecte la modification d'un pack ou de l'inventaire.
+   Le catalogue reste explicitement `DRAFT_NOT_PUBLISHED`, sans URL de
+   téléchargement ni autorisation de diffusion. La publication dans une Release
+   *documentaire* distincte de celle du programme reste **à terminer**.
 6. **Réception par ECU MEMS Manager** : **à terminer**. Lecture du catalogue
    en ligne sur demande ; import ZIP local sans réseau ; vérification hash et
    format ; sauvegarde des versions précédentes ; remplacement atomique et
    retour arrière en cas d'échec. Ne jamais écrire dans Program Files ni dans
    les bases personnelles.
-7. **Recherche commune avec l'IA** : **à terminer**. Index unique consultable
-   par la page Base de données et par le moteur documentaire IA, avec l'identité
-   du PDF, la page, l'image, le statut de validation et une commande pour ouvrir
-   le PDF. Les contenus non validés sont consultables comme sources brutes
-   étiquetées, mais pas traités comme des spécifications techniques approuvées.
+7. **Recherche commune avec l'IA** : **partiellement réalisée**. La commande
+   `search-all` du testeur indépendant sait interroger en lecture seule les
+   bases installées et les packs locaux de prévisualisation, en signalant
+   l'origine de chaque résultat et le statut `UNVERIFIED_SOURCE_TEXT`.
+   L'intégration à la page Base de données, à l'index de l'application, à
+   l'ouverture des PDF et au moteur IA reste **à terminer**. Les contenus
+   bruts non validés ne sont pas des faits techniques approuvés.
 
 ## Emplacements prévus
 
@@ -73,3 +78,26 @@ signale le pack et l'installe dans les données locales, sans réinstaller l'app
 - Son OCR contient encore des textes mal reconnus : **pack candidat uniquement**.
 - Aucun téléchargement ou mise à jour de la BD par ECU MEMS Manager n'est
   encore fonctionnel ; le libellé « mise à jour en ligne » reste désactivé.
+
+## Vérifications ajoutées le 10 novembre 2026
+
+- Pipeline OCR réorganisé par SHA-256 source : tous les PDF modifiés sont
+  sélectionnés lors d'un dépôt GitHub, chacun dans son dossier d'audit,
+  avec un pack candidat indépendant et un compte rendu par source.
+- Les modifications de code seules ne relancent pas le long OCR des anciens PDF.
+- L'absence de langue OCR reconnue reste bloquante pour le pack OCR complet :
+  ne pas annoncer une extraction complète en cas d'échec.
+- `mems-forge draft-catalogue --packs <dossier> --output <catalogue.json>`
+  prépare un catalogue **local et non publié**.
+- `mems-forge verify-catalogue --packs <dossier> --catalogue <catalogue.json>`
+  contrôle l'inventaire sur les octets réels.
+- `mems-forge search-all --install-root <installation> --store <depot-local>
+  --query <texte>` combine les références existantes et les preuves PDF
+  de prévisualisation, **sans modifier les données installées**.
+- Tests automatisés GitHub : construction PDF, SHA-256, doublons, corruption,
+  non-régression des bases existantes et provenance des pages.
+
+**À ne pas confondre** : une suite de tests verte valide le fonctionnement
+du traitement et du contrôle d'intégrité ; elle ne certifie pas la pertinence
+technique ou les droits de redistribution d'un PDF. Aucun Setup ou pack
+officiel n'a été publié par ces changements.
