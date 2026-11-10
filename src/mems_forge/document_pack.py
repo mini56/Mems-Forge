@@ -337,12 +337,18 @@ def inspect_document_pack(path: Path) -> dict:
                     integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
                     pages = db.execute("SELECT COUNT(*) FROM source_pages").fetchone()[0]
                     ocr_pages = db.execute("SELECT COUNT(*) FROM pack_ocr_pages").fetchone()[0]
-                    ocr_variants = db.execute(
+                    # Format-v1 packs issued before adaptive OCR had no
+                    # variants table; they remain readable and unapproved.
+                    table_present = db.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='pack_ocr_variants'"
+                    ).fetchone() is not None
+                    ocr_variants = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_variants"
-                    ).fetchone()[0]
-                    incorrectly_approved = db.execute(
+                    ).fetchone()[0] if table_present else 0)
+                    incorrectly_approved = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_variants WHERE approved_for_ai<>0"
-                    ).fetchone()[0]
+                    ).fetchone()[0] if table_present else 0)
                     metadata = db.execute(
                         "SELECT value FROM database_metadata WHERE key='publication_state'"
                     ).fetchone()
