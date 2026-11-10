@@ -447,10 +447,14 @@ def resolve_image_references(
 
 
 def audit_expert_image_links(install_root: Path, expert_path: Path) -> dict[str, Any]:
+    from .source_corrections import effective_source_references
+    correction_lot = effective_source_references(install_root)
     findings: dict[str, Any] = {
         "total": 0, "verified": 0, "unresolved": [],
         "status_counts": {}, "source": str(expert_path),
         "resolved_image_parts": 0, "missing_reference_parts": [],
+        "effective_corrections": [], "correction_lot_status": correction_lot["status"],
+        "correction_lot_sha256": correction_lot.get("sha256"),
     }
     if not expert_path.is_file():
         return findings
@@ -467,14 +471,34 @@ def audit_expert_image_links(install_root: Path, expert_path: Path) -> dict[str,
                 "SELECT knowledge_key,image_ref FROM mems_knowledge_item "
                 "WHERE image_ref IS NOT NULL AND trim(image_ref) != ''"
             )
-            cache: dict[str, dict[str, Any]] = {}
+            cache: dict[str, list[dict[str, Any]]] = {}
             for key, ref in references:
                 ref = str(ref)
-                if ref not in cache:
-                    cache[ref] = resolve_image_references(
-                        install_root, ref, manifest=manifest,
-                    )
-                resolved = cache[ref]
+                correction = correction_lot["entries"].get(str(key))
+                if correction and ref == correction["legacy_image_ref"]:
+                    effective = tuple(correction["effective_image_refs"])
+                    cache_key = "effective:" + str(key)
+                    if cache_key not in cache:
+                        cache[cache_key] = [
+                            resolve_image_reference(
+                                install_root, name, manifest=manifest
+                            ) for name in effective
+                        ]
+                    resolved = cache[cache_key]
+                    findings["effective_corrections"].append({
+                        "knowledge_key": key, "legacy_image_ref": ref,
+                        "effective_image_refs": list(effective),
+                        "source_correction_id": correction["source_correction_id"],
+                        "verification_level": correction["verification_level"],
+                        "reason": correction["reason"],
+                        "lot_sha256": correction_lot["sha256"],
+                    })
+                else:
+                    if ref not in cache:
+                        cache[ref] = resolve_image_references(
+                            install_root, ref, manifest=manifest,
+                        )
+                    resolved = cache[ref]
                 found = [link for link in resolved if link["status"] == "OK"]
                 missing = [link for link in resolved if link["status"] != "OK"]
                 findings["total"] += 1
@@ -694,6 +718,8 @@ def audit_install(
         blockers.append("PACK_SEARCH_EMPTY")
     if expert_image_links.get("error"):
         blockers.append("EXPERT_IMAGE_LINK_AUDIT_FAILED")
+    if expert_image_links.get("correction_lot_status") != "OK":
+        blockers.append("VERIFIED_RAVE_SOURCE_CORRECTION_LOT_UNAVAILABLE")
     if expert_image_links["unresolved"]:
         blockers.append(
             "EXPERT_IMAGE_REFERENCES_NOT_OPENABLE:" +
@@ -758,6 +784,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"Images installées : **{img['available_images']}/{img['expected_images']}**",
         f"Images contrôlées par SHA-256 : **{img['sha256_verified']}**",
         f"Références images de la base experte résolues : **{image_links['verified']}/{image_links['total']}**",
+        f"Corrections officielles de provenance appliquées en lecture : **{len(image_links['effective_corrections'])}**",
         "",
         "## Bases de données SQLite",
         "",

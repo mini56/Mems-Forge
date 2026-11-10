@@ -5,7 +5,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from .package_audit import _readonly_sqlite, resolve_image_references
+from .package_audit import _readonly_sqlite, resolve_image_references, resolve_image_reference
+from .source_corrections import effective_source_references
 
 # These are existing, independently populated database schemas. A query cannot
 # choose arbitrary SQL identifiers or modify an installed database.
@@ -86,7 +87,22 @@ def search_database(
                     if installed_root is not None:
                         value = entry["fields"].get("image_ref")
                         if value:
-                            parts = resolve_image_references(installed_root, value)
+                            correction = effective_source_references(
+                                installed_root
+                            ) if entry["fields"].get("source_table") is None else None
+                            approved = correction["entries"].get(
+                                str(entry["fields"].get("knowledge_key", ""))
+                            ) if correction and correction["status"] == "OK" else None
+                            if approved and value == approved["legacy_image_ref"]:
+                                parts = [
+                                    resolve_image_reference(installed_root, ref)
+                                    for ref in approved["effective_image_refs"]
+                                ]
+                                entry["effective_image_refs"] = approved["effective_image_refs"]
+                                entry["historical_image_ref"] = value
+                                entry["correction_source_lot_sha256"] = correction["sha256"]
+                            else:
+                                parts = resolve_image_references(installed_root, value)
                             available = [p for p in parts if p["status"] == "OK"]
                             missing = [p for p in parts if p["status"] != "OK"]
                             entry["source_file_found"] = bool(parts) and not missing
