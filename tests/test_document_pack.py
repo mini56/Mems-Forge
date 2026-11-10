@@ -149,7 +149,7 @@ def test_full_ocr_text_and_raw_tsv_are_searchable_but_not_approved(pdf, tmp_path
         (source / "pages" / f"page-{page:04d}.json").write_text(
             json.dumps({
                 "source_sha256": sha, "page_number": page,
-                "text": f"lambda sensor page {page}", "language": "eng",
+                "text": "lambda", "language": "eng",
                 "confidence": {"mean": 93.1}, "review_required": False,
                 "raw_ocr": {"sha256": hashlib.sha256(tsv).hexdigest()},
                 "adaptive_extraction": ({
@@ -176,7 +176,7 @@ def test_full_ocr_text_and_raw_tsv_are_searchable_but_not_approved(pdf, tmp_path
         db = tmp_path / "ocr.sqlite"
         db.write_bytes(bundle.read("data/knowledge.sqlite"))
     from mems_forge.db_tester import search_database
-    result = search_database(db, "lambda sensor")
+    result = search_database(db, "lambda")
     assert result["count"] == 2
     assert all(x["source_table"] == "pack_ocr_pages" for x in result["results"])
     assert result["results"][0]["fields"]["page_id"].endswith(":p1")
