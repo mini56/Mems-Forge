@@ -99,6 +99,32 @@ def inspect_sqlite(path: Path) -> dict[str, Any]:
                     info["tables"][table] = database.execute(
                         f'SELECT COUNT(*) FROM "{table}"'
                     ).fetchone()[0]
+            # The revision table can preserve the PDF's original SHA-256
+            # even when its user-facing document_key is an RCL catalogue ID.
+            # Inspect candidates explicitly rather than guessing identities.
+            info["revision_schemas"] = {}
+            info["revision_metadata"] = []
+            for table in sorted(names):
+                if not table.startswith("ravemems_") or not any(
+                    token in table for token in ("revision", "source", "file")
+                ):
+                    continue
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
+                    continue
+                columns = [
+                    row[1] for row in database.execute(f'PRAGMA table_info("{table}")')
+                ]
+                info["revision_schemas"][table] = columns
+                for row in database.execute(f'SELECT * FROM "{table}" LIMIT 150'):
+                    info["revision_metadata"].append({
+                        "table": table,
+                        **{
+                            field: (value[:500] if isinstance(value, str) else
+                                    value if isinstance(value, (int, float, type(None)))
+                                    else str(value)[:500])
+                            for field, value in dict(row).items()
+                        },
+                    })
             if "ravemems_document" in names:
                 # Document IDs can be SHA-256-derived, not PDF filenames.
                 # Preserve the pack's own metadata so each alternate name
@@ -417,7 +443,9 @@ def _source_to_pack_key(source: dict[str, Any], pack: dict[str, Any]) -> tuple[s
         if normalized_key(key) == stem:
             possible[key] = "EXACT_DOCUMENT_NAME"
 
-    for metadata in pack.get("document_metadata", []):
+    for metadata in (
+        pack.get("document_metadata", []) + pack.get("revision_metadata", [])
+    ):
         key = metadata.get("document_key")
         if key not in pack.get("document_keys", []):
             continue
