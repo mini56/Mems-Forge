@@ -291,6 +291,112 @@ def audit_reference(install_root: Path) -> dict[str, Any]:
     return info
 
 
+def resolve_image_reference(
+    install_root: Path, reference: str, *, manifest: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Resolve either a source-relative path or a symbolic RAVE image key.
+
+    The expert SQLite often stores 'RCL0194ENG:20.3'; the manifest maps
+    'rave:RCL0194ENG:20.3' to 'images/rave/RCL0194ENG_20_3.png'.
+    Never invent a path or classify a mere text key as a real image.
+    """
+    root = install_root / "database" / "reference"
+    value = reference.strip()
+    outcome: dict[str, Any] = {
+        "reference": value, "status": "NOT_LISTED", "path": None,
+    }
+    if not value:
+        outcome["status"] = "EMPTY_REFERENCE"
+        return outcome
+    if manifest is None:
+        path = root / "manifest.json"
+        if not path.is_file():
+            outcome["status"] = "MANIFEST_MISSING"
+            return outcome
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            outcome["status"] = "MANIFEST_INVALID"
+            return outcome
+
+    relative = value.replace("\\", "/")
+    expected_sha: str | None = None
+    if relative.lower().startswith("database/reference/"):
+        relative = relative[len("database/reference/"):]
+    if not relative.lower().startswith("images/"):
+        visual = manifest.get("visual_assets", {})
+        diagrams = manifest.get("diagrams", {})
+        item = visual.get(value) or visual.get("rave:" + value)
+        if item is None:
+            item = diagrams.get(value)
+        if isinstance(item, dict):
+            relative = str(item.get("path", ""))
+            expected_sha = item.get("sha256")
+        elif isinstance(item, str):
+            relative = item
+        else:
+            return outcome
+    image = _safe_file(root, relative)
+    if image is None or image.suffix.lower() not in IMAGE_SUFFIXES:
+        outcome["status"] = "UNSAFE_PATH"
+    elif not image.is_file():
+        outcome["status"] = "FILE_MISSING"
+        outcome["relative_path"] = relative
+    elif expected_sha and file_sha256(image).lower() != str(expected_sha).lower():
+        outcome["status"] = "HASH_MISMATCH"
+        outcome["relative_path"] = relative
+    else:
+        outcome["status"] = "OK"
+        outcome["path"] = str(image)
+        outcome["relative_path"] = relative
+        outcome["sha256_verified"] = bool(expected_sha)
+    return outcome
+
+
+def audit_expert_image_links(install_root: Path, expert_path: Path) -> dict[str, Any]:
+    findings: dict[str, Any] = {
+        "total": 0, "verified": 0, "unresolved": [],
+        "status_counts": {}, "source": str(expert_path),
+    }
+    if not expert_path.is_file():
+        return findings
+    manifest_file = install_root / "database" / "reference" / "manifest.json"
+    if not manifest_file.is_file():
+        return findings
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        with _readonly_sqlite(expert_path) as db:
+            cols = {row[1] for row in db.execute("PRAGMA table_info(mems_knowledge_item)")}
+            if not {"image_ref", "knowledge_key"} <= cols:
+                return findings
+            references = db.execute(
+                "SELECT knowledge_key,image_ref FROM mems_knowledge_item "
+                "WHERE image_ref IS NOT NULL AND trim(image_ref) != ''"
+            )
+            cache: dict[str, dict[str, Any]] = {}
+            for key, ref in references:
+                ref = str(ref)
+                if ref not in cache:
+                    cache[ref] = resolve_image_reference(
+                        install_root, ref, manifest=manifest,
+                    )
+                linked = cache[ref]
+                findings["total"] += 1
+                status = linked["status"]
+                findings["status_counts"][status] = (
+                    findings["status_counts"].get(status, 0) + 1
+                )
+                if status == "OK":
+                    findings["verified"] += 1
+                else:
+                    findings["unresolved"].append({
+                        "knowledge_key": key, "image_ref": ref, "status": status,
+                    })
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        findings["error"] = str(exc)
+    return findings
+
+
 def _source_to_pack_key(source: dict[str, Any], pack: dict[str, Any]) -> tuple[str | None, str]:
     """Only explicit names or independently verifiable SHA-256 identities.
 
@@ -386,6 +492,9 @@ def audit_install(
     }
     databases = {key: inspect_sqlite(path) for key, path in locations.items()}
     comparison = _pack_comparison(original, databases["memslibrary_pack"])
+    expert_image_links = audit_expert_image_links(
+        install_root, locations["expert_database"]
+    )
 
     extra_pdfs: list[dict[str, Any]] = []
     if extra_pdf_root is not None:
@@ -434,6 +543,13 @@ def audit_install(
             blockers.append(f"SQLITE_{name}_{database['status']}")
     if databases["memslibrary_pack"]["tables"].get("memslibrary_search", 0) == 0:
         blockers.append("PACK_SEARCH_EMPTY")
+    if expert_image_links.get("error"):
+        blockers.append("EXPERT_IMAGE_LINK_AUDIT_FAILED")
+    if expert_image_links["unresolved"]:
+        blockers.append(
+            "EXPERT_IMAGE_REFERENCES_NOT_OPENABLE:" +
+            str(len(expert_image_links["unresolved"]))
+        )
     if any(item.get("error") for item in extra_pdfs):
         blockers.append("ADDITIONAL_PDF_INPUT_UNREADABLE")
     if extra_pdfs and any(not item.get("document_key") for item in extra_pdfs):
@@ -463,6 +579,7 @@ def audit_install(
         "reference_images_and_enrichments": package,
         "databases": databases,
         "document_mapping": comparison,
+        "knowledge_image_references": expert_image_links,
         "publication_gate": {
             "state": state, "blockers": sorted(set(blockers)),
             "not_yet_proven": unverified,
@@ -475,6 +592,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     o = report["source_documents"]
     img = report["reference_images_and_enrichments"]
     mapping = report["document_mapping"]
+    image_links = report["knowledge_image_references"]
     gate = report["publication_gate"]
     lines = [
         "# MEMS Forge — Audit de la documentation réellement installée",
@@ -489,6 +607,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "(égalité de compte ≠ preuve d'identité)",
         f"Images installées : **{img['available_images']}/{img['expected_images']}**",
         f"Images contrôlées par SHA-256 : **{img['sha256_verified']}**",
+        f"Références images de la base experte résolues : **{image_links['verified']}/{image_links['total']}**",
         "",
         "## Bases de données SQLite",
         "",
