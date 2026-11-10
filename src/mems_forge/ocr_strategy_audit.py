@@ -45,7 +45,7 @@ def _numbers(text: str) -> dict:
 
 
 def _ocr(png: Path, language: str, segmentation: int, *, tsv: bool = False) -> str:
-    if segmentation not in (3, 4):
+    if segmentation not in (3, 4, 6):
         raise ValueError("UNSUPPORTED_OCR_STRATEGY")
     result = subprocess.run(
         ["tesseract", str(png), "stdout", "-l", language,
@@ -107,10 +107,28 @@ def analyze_raster_reading(
                     )
                     png = directory / (side + ".png")
                     pix.save(png)
-                    text = _ocr(png, language, 4)
+                    # Two independent segmentation modes are necessary:
+                    # page 92's left list gains its first item with PSM6,
+                    # while PSM4 protects the illustrated right column from
+                    # the drawing-text hallucinations observed with PSM6.
+                    versions = {}
+                    for psm in (4, 6):
+                        candidate = _ocr(png, language, psm)
+                        versions[f"psm{psm}"] = {
+                            "text": candidate, "numbering": _numbers(candidate),
+                        }
+                    def quality(item):
+                        n = item["numbering"]
+                        return (n["count"] - len(n["repeats"]) * 3 -
+                                len(n["gaps"]) * 2 +
+                                int(n["starts_at_one"]))
+                    preferred = ("psm6" if quality(versions["psm6"]) >
+                                 quality(versions["psm4"]) else "psm4")
                     regions[side] = {
-                        "text": text,
-                        "numbering": _numbers(text),
+                        "candidate_mode": preferred,
+                        "text": versions[preferred]["text"],
+                        "numbering": versions[preferred]["numbering"],
+                        "versions": versions,
                         "bbox_pdf": [rect.x0, rect.y0, rect.x1, rect.y1],
                     }
             numbered = {
@@ -131,6 +149,13 @@ def analyze_raster_reading(
                         "strategy": "psm4_" + side,
                         "repeats": entry["numbering"]["repeats"],
                         "gaps": entry["numbering"]["gaps"],
+                    })
+            for side, entry in regions.items():
+                if entry["versions"]["psm4"]["text"] != entry["versions"]["psm6"]["text"]:
+                    defects.append({
+                        "code": "COLUMN_OCR_MODES_DISAGREE",
+                        "strategy": side,
+                        "candidate_mode": entry["candidate_mode"],
                     })
             if two_columns:
                 defects.append({"code": "FULL_PAGE_READING_ORDER_UNTRUSTWORTHY",
