@@ -91,6 +91,8 @@ jobs:
           $auditCode=$LASTEXITCODE
           Set-Content "$outDir/audit_exit_code.txt" "$auditCode"
           Write-Host "MEMS_FORGE_AUDIT_EXIT=$auditCode"
+          & python -c "from pathlib import Path; from mems_forge.source_corrections import write_inspection; p=write_inspection(Path(r'$destination'),Path(r'$outDir')/'correction_lot_1750.json'); print('SOURCE_CORRECTION_1750',p['status'],p.get('relevant_line_count')); print(*p.get('statements',[]),sep='\\n')" 
+          if($LASTEXITCODE -ne 0){throw 'REFERENCE_CORRECTION_INSPECTION_FAILED'}
           $auditReport=Get-Content "$outDir/audit_integralite.json" -Raw | ConvertFrom-Json
           Write-Host "ORIGINAL_PAGES=$($auditReport.source_documents.total_pages)"
           Write-Host "PACK_PAGES=$($auditReport.document_mapping.pack_total_page_rows)"
