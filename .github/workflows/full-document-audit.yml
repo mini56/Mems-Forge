@@ -18,6 +18,9 @@ on:
       - 'src/mems_forge/procedure_fragments.py'
       - 'src/mems_forge/audit_postprocess.py'
       - 'src/mems_forge/full_document_audit.py'
+      - 'src/mems_forge/document_pack.py'
+      - 'tools/build_ocr_candidate.py'
+      - 'tests/test_document_pack.py'
       - 'tools/full_document_audit.py'
       - 'tools/document_hierarchy_audit.py'
       - 'tools/ocr_quality_audit.py'
@@ -87,6 +90,9 @@ jobs:
       - name: Correct final audit summary with phase-local rules
         run: python tools/postprocess_full_audit.py
 
+      - name: Generate complete source-preserving OCR candidate pack
+        run: python tools/build_ocr_candidate.py
+
       - name: Upload complete audit artifact
         uses: actions/upload-artifact@v4
         with:
@@ -94,5 +100,6 @@ jobs:
           path: |
             out/intake/
             out/full-audit/
+            out/candidate_packs_full_ocr/
           if-no-files-found: error
           compression-level: 6

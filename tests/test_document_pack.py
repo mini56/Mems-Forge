@@ -66,6 +66,55 @@ def test_corrupted_source_member_fails_integrity(pdf, tmp_path):
     assert verdict["error"] == "member_hash_invalid"
 
 
+def test_full_ocr_text_and_raw_tsv_are_searchable_but_not_approved(pdf, tmp_path):
+    import gzip
+    import hashlib
+    from mems_forge.pdf_reader import sha256_file
+    sha = sha256_file(pdf)
+    source = tmp_path / "ocr" / sha
+    (source / "pages").mkdir(parents=True)
+    (source / "raw").mkdir()
+    for page in (1, 2):
+        tsv = ("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+               "left\ttop\twidth\theight\tconf\ttext\n"
+               f"5\t{page}\t1\t1\t1\t1\t10\t10\t50\t20\t93.1\tlambda\n").encode()
+        (source / "raw" / f"page-{page:04d}.tsv.gz").write_bytes(gzip.compress(tsv))
+        (source / "pages" / f"page-{page:04d}.json").write_text(
+            json.dumps({
+                "source_sha256": sha, "page_number": page,
+                "text": f"lambda sensor page {page}", "language": "eng",
+                "confidence": {"mean": 93.1}, "review_required": False,
+                "raw_ocr": {"sha256": hashlib.sha256(tsv).hexdigest()},
+                "words": [{"text": "lambda", "confidence": 93.1,
+                           "left": 10, "top": 10, "width": 50, "height": 20}],
+            }), encoding="utf-8",
+        )
+    target = tmp_path / "with-ocr.zip"
+    result = build_document_pack(pdf, target, ocr_root=tmp_path / "ocr")
+    assert result["manifest"]["counts"]["ocr_pages"] == 2
+    assert result["manifest"]["counts"]["ocr_words"] == 2
+    assert result["manifest"]["publication_state"] == "CANDIDATE_NOT_VALIDATED"
+    assert inspect_document_pack(target)["valid"]
+    with zipfile.ZipFile(target) as bundle:
+        assert "ocr/page-0001.tsv.gz" in bundle.namelist()
+        db = tmp_path / "ocr.sqlite"
+        db.write_bytes(bundle.read("data/knowledge.sqlite"))
+    from mems_forge.db_tester import search_database
+    result = search_database(db, "lambda sensor")
+    assert result["count"] == 2
+    assert all(x["source_table"] == "pack_ocr_pages" for x in result["results"])
+    assert result["results"][0]["fields"]["page_id"].endswith(":p1")
+
+
+def test_incomplete_ocr_input_does_not_produce_a_pack(pdf, tmp_path):
+    root = tmp_path / "missing"
+    root.mkdir()
+    target = tmp_path / "blocked.zip"
+    with pytest.raises(ValueError, match="Missing verified OCR page"):
+        build_document_pack(pdf, target, ocr_root=root)
+    assert not target.exists()
+
+
 def test_existing_pack_never_overwritten(pdf, tmp_path):
     target = tmp_path / "pack.zip"
     build_document_pack(pdf, target)

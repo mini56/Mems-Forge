@@ -56,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--pdf", type=Path, required=True)
     build.add_argument("--output", type=Path, required=True)
     build.add_argument("--reader-root", type=Path)
+    build.add_argument("--ocr-root", type=Path,
+                       help="Verified full-document OCR pages and source TSV, if available")
     verify = sub.add_parser("verify-pack", help="Verify candidate ZIP and SQLite")
     verify.add_argument("path", type=Path)
     return parser
@@ -67,7 +69,8 @@ def main() -> int:
     if args.command == "build-pack":
         from .document_pack import build_document_pack
         result = build_document_pack(
-            args.pdf, args.output, reader_root=args.reader_root
+            args.pdf, args.output,
+            reader_root=args.reader_root, ocr_root=args.ocr_root
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
