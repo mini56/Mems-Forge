@@ -5,6 +5,7 @@ import hashlib
 import json
 import pathlib
 import shutil
+import subprocess
 import tempfile
 from collections import Counter
 from dataclasses import asdict
@@ -19,6 +20,9 @@ from mems_forge.ocr_reader import (
     _parse_words,
     _run_tesseract_tsv,
     _words_to_text,
+)
+from mems_forge.ocr_strategy_audit import (
+    _recover_list_with_two_resolutions, _recheck_two_column_regions,
 )
 from mems_forge.structure_candidates import run_structure_prototype
 
@@ -118,8 +122,39 @@ def _run_full_ocr(
             text = _words_to_text(words)
             confidence = _confidence_summary(words)
             max_word_length = max((len(word.text) for word in words), default=0)
+            # Repair extraction blind spots by rereading the ORIGINAL image:
+            # a malformed vertical OCR token may hide a list of numbered parts;
+            # two-column pages must not be flattened into interleaved steps.
+            # The original PSM3 TSV stays immutable for reproducibility.
+            adaptive = None
+            adaptive_failure = None
+            try:
+                recovered = _recover_list_with_two_resolutions(
+                    page, words, pix.width, pix.height,
+                    language, tmp_dir, dpi,
+                )
+                columns = _recheck_two_column_regions(
+                    page, words, pix.width, pix.height,
+                    language, tmp_dir, dpi,
+                )
+                if recovered or columns:
+                    adaptive = {
+                        "parser_version": 1,
+                        "recovered_list": recovered,
+                        "columns": columns["regions"] if columns else {},
+                        "column_gutter": columns["gutter"] if columns else None,
+                        "source": "original_pdf_region_rereads",
+                        "approved_for_technical_facts": False,
+                    }
+            except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+                adaptive_failure = f"{type(exc).__name__}: {exc}"
 
             review_reasons: list[str] = []
+            if adaptive_failure is not None:
+                review_reasons.append("automatic_region_recovery_failed")
+            if (adaptive and adaptive["recovered_list"] and
+                    not adaptive["recovered_list"]["independent_render_readings_agree"]):
+                review_reasons.append("collapsed_list_ocr_modes_conflict")
             if parse_warnings:
                 review_reasons.append("ocr_parse_warning")
             if not words:
@@ -161,6 +196,8 @@ def _run_full_ocr(
                     "sha256": render_sha,
                     "retained_as_preview": page_number in preview_pages,
                 },
+                "adaptive_extraction": adaptive,
+                "adaptive_failure": adaptive_failure,
                 "raw_ocr": {
                     "format": "tesseract_tsv",
                     "sha256": _sha256_bytes(raw_tsv),
