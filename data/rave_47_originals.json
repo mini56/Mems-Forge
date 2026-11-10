@@ -1,0 +1,247 @@
+{
+  "schema": 1,
+  "description": "47 PDF RAVE historiques originaux. Identité par blob Git et taille; le SHA-256 physique et les pages sont calculés depuis chaque PDF par l'audit.",
+  "origin": {
+    "repository": "mini56/ECU-Mems-Manager-Session",
+    "ref": "main",
+    "commit": "643de091b474f4e27917a065bdf46d5a0c764276"
+  },
+  "expected_documents": 47,
+  "documents": [
+    {
+      "path": "rave/general/testbook/tb12212e.pdf",
+      "size_bytes": 800352,
+      "git_blob_sha1": "10c9db427db57fd38dd6a716ae016d46573abea6"
+    },
+    {
+      "path": "rave/general/testbook/tb22382e.pdf",
+      "size_bytes": 943946,
+      "git_blob_sha1": "767523463da19c6a50120ebd33d3c5a3c75acb77"
+    },
+    {
+      "path": "rave/library/libxn.pdf",
+      "size_bytes": 37470,
+      "git_blob_sha1": "4dd98d5c66eb79b161f16ba8fac1dffb688dbd31"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R0809BU.PDF",
+      "size_bytes": 29396,
+      "git_blob_sha1": "a6a6568b17a88dee07476089a751b5beeb31b460"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R0962BU.PDF",
+      "size_bytes": 28787,
+      "git_blob_sha1": "9b17415e6f0c466bf3444a4ae4e80d9b9f00082f"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R2276BU.PDF",
+      "size_bytes": 17241,
+      "git_blob_sha1": "c89c8e7e20d7c6c9b42d5e747b24239d5d05efeb"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R3591BU.PDF",
+      "size_bytes": 51562,
+      "git_blob_sha1": "d21f8564d8c4183935697b351ea2888c46411f14"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R3814BU.PDF",
+      "size_bytes": 21563,
+      "git_blob_sha1": "7f19ad229b0b64bd556a350196eb687022fd411b"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R4083BU.PDF",
+      "size_bytes": 17702,
+      "git_blob_sha1": "588f338f767bec209eeff9c68157b3f709d4bc18"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R5424BU.PDF",
+      "size_bytes": 25061,
+      "git_blob_sha1": "71539a179aff58904392b6f12c6cc2756c672cef"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R5898BU.PDF",
+      "size_bytes": 26825,
+      "git_blob_sha1": "ceb40c4ddb43d2e7cfe8a2b98d480f34114038f2"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R6255BU.PDF",
+      "size_bytes": 22111,
+      "git_blob_sha1": "4e5bdccdc445706815ab7471a70575613231562c"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R6499BU.PDF",
+      "size_bytes": 111993,
+      "git_blob_sha1": "b0c9bbc8bc2d3dd670a2a135021e8ce76859b3a0"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R6529BU.PDF",
+      "size_bytes": 17452,
+      "git_blob_sha1": "28f64b92de2da48001c9f03d567f3b510fb1adcb"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R6538BU.PDF",
+      "size_bytes": 30468,
+      "git_blob_sha1": "45c93e200ae4c9428f18da0c180507443df280c0"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R6707BU.PDF",
+      "size_bytes": 20247,
+      "git_blob_sha1": "3bf573624f38bfdfb691099fdb4d29ed00ca09b6"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R6957BU.PDF",
+      "size_bytes": 29217,
+      "git_blob_sha1": "4f9874395975041b64dc3b9cf6ae7e6a2b5781d8"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R7303BU.PDF",
+      "size_bytes": 21043,
+      "git_blob_sha1": "c39f1947593f4d13016e479f950bca249ef9e9a4"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R7518BU.PDF",
+      "size_bytes": 62557,
+      "git_blob_sha1": "ed0d72ca3e5e0da2eb53b6c54ba621a071d8b44b"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R7532BU.PDF",
+      "size_bytes": 207635,
+      "git_blob_sha1": "c6568b0daa5ae232ed5387ef38286de039c7b843"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R7965BU.PDF",
+      "size_bytes": 19539,
+      "git_blob_sha1": "9f8f6d7a79e1e793a500e2d722deb0c2ff5aa955"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R8101BU.PDF",
+      "size_bytes": 29009,
+      "git_blob_sha1": "8241611a45539a82e59dafe68d39ba5fabef9b9e"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R8381BU.PDF",
+      "size_bytes": 10765,
+      "git_blob_sha1": "843592782057ab04086621724491b10939bc09e7"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R8411BU.PDF",
+      "size_bytes": 18097,
+      "git_blob_sha1": "4948dca6152b13a0e19f8acc25362b33547276a3"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/R8413BU.PDF",
+      "size_bytes": 14505,
+      "git_blob_sha1": "80a91aa6e32ba39cbd5bf4f25a0004b25fe58a5e"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/RT0003BU.PDF",
+      "size_bytes": 19224,
+      "git_blob_sha1": "6c23d6c83087fd59d170adb6d1ed0746f4297c91"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X1885BU.PDF",
+      "size_bytes": 51141,
+      "git_blob_sha1": "46e4da972506da46ca63ec979b41f58765fbc314"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X6255BU.PDF",
+      "size_bytes": 19598,
+      "git_blob_sha1": "49e2ff51cd5f3c4aa21e4648b16e8529fc8464d5"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X8386BU.PDF",
+      "size_bytes": 142605,
+      "git_blob_sha1": "fa2b793e6b3896a8bdebf0dfb5f7ef6a9390d081"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X8408BU.PDF",
+      "size_bytes": 27523,
+      "git_blob_sha1": "86eb55785f9b2c877d3e7cb9c8e125355428ac56"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X8414BU.PDF",
+      "size_bytes": 76262,
+      "git_blob_sha1": "b99fbd9938f76ecf646ebc107c8559ee8c524e1b"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X8417BU.PDF",
+      "size_bytes": 166088,
+      "git_blob_sha1": "9446d9c26b77e684e9f2a9e961d67488f469b27e"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X8419BU.PDF",
+      "size_bytes": 16225,
+      "git_blob_sha1": "ff256ebe05cde69a8c0a29e076c020ab378d0d3c"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X8420BU.PDF",
+      "size_bytes": 15191,
+      "git_blob_sha1": "6cd8ec02cebfd47f78ad3f37fb9c0821fd9fa7f6"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X8479BU.PDF",
+      "size_bytes": 76216,
+      "git_blob_sha1": "56f253d2311c26a5c5223dac7ebf6cd698bf0ddd"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X8499BU.PDF",
+      "size_bytes": 25335,
+      "git_blob_sha1": "1906b5d1b5826726dd49e748d8d269300f5b5946"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/X8507bu.pdf",
+      "size_bytes": 15588,
+      "git_blob_sha1": "b758dc1a5a5c9f210b18d075980b71d010d3437f"
+    },
+    {
+      "path": "rave/Mini Tech Bulletins/Xndb2eng.pdf",
+      "size_bytes": 74748,
+      "git_blob_sha1": "abf37776d6368f5b519f2fb95751aadbd5369041"
+    },
+    {
+      "path": "rave/xn/cdxn990e.pdf",
+      "size_bytes": 1109933,
+      "git_blob_sha1": "153d62b3baa2b750469f700275972aee015f7e6c"
+    },
+    {
+      "path": "rave/xn/elxn970e.pdf",
+      "size_bytes": 3955242,
+      "git_blob_sha1": "337f957045cb9ea79f38a1a5e3ddb01f194c7156"
+    },
+    {
+      "path": "rave/xn/Hr01791x.pdf",
+      "size_bytes": 663602,
+      "git_blob_sha1": "f5f232a4c3d6eabf4952c62408b7011e3ad43f5c"
+    },
+    {
+      "path": "rave/xn/hr01795e.pdf",
+      "size_bytes": 1375683,
+      "git_blob_sha1": "63569965a1b6d62a5dd00553b1831254a9f2feb8"
+    },
+    {
+      "path": "rave/xn/ir07102e.PDF",
+      "size_bytes": 533137,
+      "git_blob_sha1": "eac1b09c81594bf7c82364ddd46bbc9adfe0899b"
+    },
+    {
+      "path": "rave/xn/mcxn960e.pdf",
+      "size_bytes": 16096,
+      "git_blob_sha1": "920082d95a111d00e43d9782971539a504139d41"
+    },
+    {
+      "path": "rave/xn/prxn990e.pdf",
+      "size_bytes": 168535,
+      "git_blob_sha1": "0af93966afbcd7b92c54206e9dce3f6159b01dbd"
+    },
+    {
+      "path": "rave/xn/roxn990e.pdf",
+      "size_bytes": 3869452,
+      "git_blob_sha1": "b3972a58ccae328983dc566dfacc383a59d0e821"
+    },
+    {
+      "path": "rave/xn/wmxn990e.pdf",
+      "size_bytes": 4744911,
+      "git_blob_sha1": "82263eb36bb194dfa969d0471d10ef11078ce521"
+    }
+  ]
+}
