@@ -1,4 +1,4 @@
-name: MEMS Forge - Auditer un vrai PDF du depot
+name: MEMS Forge - Controle negatif sans OCR
 
 on:
   push:
@@ -55,8 +55,20 @@ jobs:
                   "review_items": len(report["reviews"]),
                   "release_authorized": report["approved_for_release"],
               }, ensure_ascii=False))
-              if not report["native_source_parity_ok"]:
-                  raise SystemExit(f"REAL_PDF_SOURCE_PARITY_FAILED: {source}")
+              # Negative safety test: the raster original has no native text.
+              # An intentionally raw pack MUST be blocked rather than
+              # treated as a valid technical knowledge update.
+              if not report["pack_integrity_ok"]:
+                  raise SystemExit(f"RAW_PACK_INTEGRITY_FAILED: {source}")
+              if report["approved_for_release"] or report["approved_for_ai"]:
+                  raise SystemExit("UNREVIEWED_RASTER_PDF_WRONGLY_APPROVED")
+              if report["native_text_pages"] == 0:
+                  missing = [x for x in report["issues"]
+                             if x["code"] == "NO_NATIVE_TEXT_OR_OCR"]
+                  if len(missing) != report["source_pages"]:
+                      raise SystemExit("RASTER_NO_OCR_NOT_REJECTED_ON_ALL_PAGES")
+              elif not report["native_source_parity_ok"]:
+                  raise SystemExit("NATIVE_TEXT_PARITY_FAILED")
           PY
       - name: Publier les rapports de verification uniquement
         if: always()
