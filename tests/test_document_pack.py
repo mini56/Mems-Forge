@@ -186,6 +186,30 @@ def test_full_ocr_text_and_raw_tsv_are_searchable_but_not_approved(pdf, tmp_path
     assert adapted["results"][0]["fields"]["crosschecked"] == 1
     assert adapted["results"][0]["fields"]["approved_for_ai"] == 0
 
+    # A rehashed, internally consistent ZIP is still rejected when SQLite
+    # search text no longer matches the original OCR TSV.
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "UPDATE pack_ocr_pages SET text='INVENTED TECHNICAL CONTENT' "
+            "WHERE page_id LIKE '%:p1'"
+        )
+        connection.commit()
+    damaged = tmp_path / "rehashed-but-wrong.zip"
+    with zipfile.ZipFile(target) as original:
+        members = {name: original.read(name) for name in original.namelist()}
+    members["data/knowledge.sqlite"] = db.read_bytes()
+    modified_manifest = json.loads(members["manifest.json"])
+    modified_manifest["members_sha256"]["data/knowledge.sqlite"] = hashlib.sha256(
+        members["data/knowledge.sqlite"]
+    ).hexdigest()
+    members["manifest.json"] = json.dumps(modified_manifest).encode("utf-8")
+    with zipfile.ZipFile(damaged, "w") as output:
+        for name, content in members.items():
+            output.writestr(name, content)
+    rejected = inspect_document_pack(damaged)
+    assert rejected["valid"] is False
+    assert rejected["error"] == "ocr_text_not_from_source_tsv"
+
 
 def test_incomplete_ocr_input_does_not_produce_a_pack(pdf, tmp_path):
     root = tmp_path / "missing"
