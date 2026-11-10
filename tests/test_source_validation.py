@@ -90,3 +90,20 @@ def test_invalid_pack_fails_closed(tmp_path: Path):
     assert result["approved_for_release"] is False
     assert result["approved_for_ai"] is False
     assert any(x["code"] == "INVALID_PACK" for x in result["issues"])
+
+
+def test_existing_candidate_is_audited_on_reuse(tmp_path: Path):
+    from mems_forge.depot_pipeline import process_one_document
+    from mems_forge.pdf_reader import sha256_file
+
+    pdf = _pdf(tmp_path / "original.pdf")
+    digest = sha256_file(pdf)
+    store = tmp_path / "output"
+    destination = store / "candidate_packs_full_ocr" / f"mems-forge-full-ocr-{digest[:24]}.zip"
+    build_document_pack(pdf, destination)
+    result = process_one_document(pdf, store)
+    assert result["status"] == "ALREADY_PRESENT"
+    assert result["source_parity_verified"] is True
+    assert result["approved_for_ai"] is False
+    report = store / "full-audit" / digest / "source_validation.json"
+    assert json.loads(report.read_text())["native_source_parity_ok"] is True
