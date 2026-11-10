@@ -18,6 +18,9 @@ on:
       - 'src/mems_forge/procedure_fragments.py'
       - 'src/mems_forge/audit_postprocess.py'
       - 'src/mems_forge/full_document_audit.py'
+      - 'src/mems_forge/depot_pipeline.py'
+      - 'tools/process_full_depot.py'
+      - 'tests/test_depot_pipeline.py'
       - 'src/mems_forge/document_pack.py'
       - 'tools/build_ocr_candidate.py'
       - 'tests/test_document_pack.py'
@@ -51,7 +54,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           lfs: true
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -75,25 +78,13 @@ jobs:
       - name: Build immutable source intake manifest
         run: python tools/depot_intake.py
 
-      - name: Run full 482-page extraction audit
-        run: python tools/full_document_audit.py
+      - name: Full OCR audit for each changed PDF, isolated by source hash
+        env:
+          MEMS_FORGE_BEFORE_SHA: ${{ github.event.before }}
+        run: python tools/process_full_depot.py
 
-      - name: Reconstruct manufacturer chapter hierarchy
-        run: python tools/document_hierarchy_audit.py
-
-      - name: Audit OCR spelling before translation
-        run: python tools/ocr_quality_audit.py
-
-      - name: Detect chapter-constrained continuation fragments
-        run: python tools/full_fragment_audit.py
-
-      - name: Correct final audit summary with phase-local rules
-        run: python tools/postprocess_full_audit.py
-
-      - name: Generate complete source-preserving OCR candidate pack
-        run: python tools/build_ocr_candidate.py
-
-      - name: Upload complete audit artifact
+      - name: Upload per-document audit report and isolated candidate packs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mems-forge-full-audit-${{ github.run_id }}
