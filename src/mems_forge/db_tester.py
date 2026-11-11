@@ -24,6 +24,7 @@ SEARCH_CONFIG: dict[str, tuple[str, ...]] = {
     "pack_ocr_page_content": ("content_kind", "inspection_status"),
     "pack_procedure_continuation_candidates": ("candidate_repair_number", "chapter_id"),
     "pack_procedure_continuation_steps": ("candidate_text",),
+    "pack_source_notices": ("source_text", "notice_kind"),
 }
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "memslibrary_search": (
@@ -70,6 +71,12 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
         "candidate_id", "step_number", "candidate_text",
         "source_lines_json", "source_line_count",
         "measurement_mentions_json", "validation_state", "approved_for_ai",
+    ),
+    "pack_source_notices": (
+        "page_id", "original_physical_page", "source_region",
+        "notice_kind", "source_text", "source_lines_json",
+        "source_line_count", "relationship_to_procedure",
+        "validation_state", "approved_for_ai",
     ),
 }
 
