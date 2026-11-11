@@ -107,7 +107,7 @@ def test_real_image_sent_to_local_model_and_is_only_candidate(tmp_path: Path):
     args = model.call_args.args
     assert args[0] == "http://127.0.0.1:11434/api/chat"
     assert args[1] == "qwen3-vl:4b"
-    assert args[2].startswith(b"\\x89PNG")
+    assert args[2][:4] == bytes((137, 80, 78, 71))
     assert report["local_model_invoked"]
     assert report["items"][0]["model_quote_in_ocr"]
     assert report["items"][0]["approved_for_ai"] is False
