@@ -379,6 +379,8 @@ def _apply_document_context(
                 "raw_fragment_count": int(raw_page.get("fragment_count", 0)),
                 "fragment_count": len(accepted),
                 "fragments": accepted,
+                "source_notice_count": raw_page.get("source_notice_count", 0),
+                "source_notices": raw_page.get("source_notices", []),
                 "rejected_raw_fragment_count": len(rejected),
                 "rejected_raw_fragments": rejected,
             }
