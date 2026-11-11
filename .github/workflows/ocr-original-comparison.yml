@@ -90,6 +90,25 @@ jobs:
                       raise SystemExit("LIST_NOT_CROSSCHECKED_AT_200_AND_400_DPI")
                   if recovered["numbering"]["numbers"] != list(range(1, 20)):
                       raise SystemExit("SOURCE_HAS_19_COMPONENTS_OCR_NOT_RECOVERED")
+                  anchored = recovered.get("anchored_items", [])
+                  if (len(anchored) != 19 or
+                          not recovered.get("ocr_locations_crosschecked") or
+                          [entry["number"] for entry in anchored] != list(range(1, 20))):
+                      raise SystemExit("NOT_ALL_19_COMPONENTS_GROUNDED_IN_ORIGINAL_PDF")
+                  page_bbox = source
+                  if any(
+                      entry["approved_for_ai"] is not False or
+                      entry["validation_state"] != "OCR_LOCATION_CANDIDATE" or
+                      entry["bbox_pdf"][0] >= entry["bbox_pdf"][2] or
+                      entry["bbox_pdf"][1] >= entry["bbox_pdf"][3]
+                      for entry in anchored
+                  ):
+                      raise SystemExit("COMPONENT_COORDINATES_INVALID_OR_APPROVED")
+                  print("PAGE116_ORIGINAL_SOURCE_ANCHORS=" + json.dumps({
+                      "numbered_components": len(anchored),
+                      "all_19_have_original_pdf_boxes": True,
+                      "any_technical_facts_approved": False,
+                  }))
                   if "Manifold PTC heater" not in recovered["candidate_text"]:
                       raise SystemExit("COMPONENT_NINE_DESCRIPTION_NOT_RECOVERED")
                   if "Purge valve" not in recovered["candidate_text"]:
