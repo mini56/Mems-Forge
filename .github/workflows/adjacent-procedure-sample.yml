@@ -165,6 +165,18 @@ jobs:
                   )
               if built['manifest']['counts']['safety_notice_candidates'] != len(notices):
                   raise SystemExit('SAFETY_NOTICE_MANIFEST_AND_SQLITE_DISAGREE')
+          for original_page, text_prefix in (
+                  (94, 'Note: Retain the push rods'),
+                  (306, 'Note: Support driving flange')):
+              wrapped = [
+                  row for row in notices
+                  if row[0] == original_page and row[1] == 'NOTE'
+                  and row[3].startswith(text_prefix)
+              ]
+              if not wrapped or all(row[4] < 2 for row in wrapped):
+                  raise SystemExit(
+                      f'REAL_SOURCE_NOTE_PARAGRAPH_TRUNCATED_PAGE_{original_page}'
+                  )
           summary['source_notice_count'] = len(notices)
           summary['original_page304_warning_preserved'] = bool(matched_page304)
           summary['source_notices_for_review'] = [
