@@ -21,7 +21,7 @@ def _fragment(page: int, first: int, last: int,
         source_text = f"{number}. Verified transcription candidate {number}"
         entries.append({
             "number": number,
-            "text": source_text,
+            "text": f"Verified transcription candidate {number}",
             "source": {
                 "region": "left",
                 "source_line_key": [page, 1, number],
