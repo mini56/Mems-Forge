@@ -26,12 +26,12 @@ jobs:
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
           python -m pip install .
           python -m pip install pytest
-          python -m pytest tests/test_cross_page_procedure_candidates.py tests/test_procedure_fragments.py tests/test_full_ocr_step_text.py tests/test_document_pack.py -q
+          python -m pytest tests/test_cross_page_procedure_candidates.py tests/test_procedure_fragments.py tests/test_full_ocr_step_text.py tests/test_source_safety_notices.py tests/test_document_pack.py -q
       - name: Diagnostiquer uniquement des pages physiques voisines
         shell: bash
         run: |
           python -u - <<'PY'
-          import hashlib, json, sqlite3, zipfile
+          import hashlib, json, sqlite3, zipfile, subprocess, re
           from pathlib import Path
           import pymupdf
           from mems_forge.full_document_audit import run_full_document_audit
@@ -145,6 +145,79 @@ jobs:
                   raise SystemExit('PAGE93_22_NM_SPANNING_FOUR_LINES_NOT_PRESERVED')
               if any(x[5] != 0 for x in full_steps):
                   raise SystemExit('UNVALIDATED_MULTILINE_STEP_APPROVED')
+          with sqlite3.connect(dbfile) as db:
+              notices = db.execute(
+                  'SELECT original_physical_page,notice_kind,source_region,'
+                  'source_text,source_line_count,validation_state,approved_for_ai '
+                  'FROM pack_source_notices ORDER BY original_physical_page'
+              ).fetchall()
+              matched_page304 = [
+                  notice for notice in notices
+                  if (notice[0] == 304
+                      and notice[1] == 'WARNING'
+                      and 'Support on safety stands.' in notice[3]
+                      and notice[5] == 'unresolved'
+                      and notice[6] == 0)
+              ]
+              if not matched_page304:
+                  raise SystemExit(
+                      'REAL_304_SAFETY_WARNING_MISSING_FROM_SQLITE'
+                  )
+              if built['manifest']['counts']['safety_notice_candidates'] != len(notices):
+                  raise SystemExit('SAFETY_NOTICE_MANIFEST_AND_SQLITE_DISAGREE')
+          summary['source_notice_count'] = len(notices)
+          summary['original_page304_warning_preserved'] = bool(matched_page304)
+          # Independent render and fresh OCR probes on original physical
+          # page 93. These are source-reading checks, NOT a semantic approval.
+          expected_values = {3: '0.152 mm', 8: '88 Nm', 9: '22 Nm'}
+          independent_check = {}
+          with pymupdf.open(excerpt) as selected_doc:
+              original_page93 = selected_doc[2]
+              for step_num, phrase in expected_values.items():
+                  sources = json.loads(by_step[step_num][4])
+                  x0 = min(line['bbox'][0] for line in sources)
+                  y0 = min(line['bbox'][1] for line in sources)
+                  x1 = max(line['bbox'][2] for line in sources)
+                  y1 = max(line['bbox'][3] for line in sources)
+                  scale = 72.0 / 300.0
+                  clip = pymupdf.Rect(
+                      max(0, x0 * scale - 3), max(0, y0 * scale - 3),
+                      min(original_page93.rect.width, x1 * scale + 3),
+                      min(original_page93.rect.height, y1 * scale + 3),
+                  )
+                  readings = {}
+                  for resolution in (300, 400):
+                      png_file = output / f'page93-step{step_num}-{resolution}.png'
+                      pix = original_page93.get_pixmap(
+                          matrix=pymupdf.Matrix(resolution/72,resolution/72),
+                          clip=clip, alpha=False,
+                      )
+                      pix.save(png_file)
+                      completed = subprocess.run(
+                          ['tesseract', str(png_file), 'stdout', '-l', 'eng',
+                           '--psm', '6'], capture_output=True,
+                          text=True, check=True,
+                      )
+                      png_file.unlink()
+                      recognized = ' '.join(completed.stdout.split())
+                      verified = bool(re.search(
+                          re.escape(phrase).replace(r'\ ', r'\s*'),
+                          recognized, re.IGNORECASE,
+                      ))
+                      readings[str(resolution)] = {
+                          'literal_found': verified,
+                          'fresh_ocr_text': recognized[:350],
+                      }
+                  independent_check[str(step_num)] = {
+                      'expected_source_ocr_value': phrase,
+                      'rendered_pdf_probe': readings,
+                      'cross_render_agreement': all(
+                          record['literal_found']
+                          for record in readings.values()
+                      ),
+                      'approved_for_technical_answers': False,
+                  }
+          summary['independent_pdf_value_readings'] = independent_check
           dbfile.unlink()
           summary['candidate_step_count'] = len(full_steps)
           summary['page93_literal_measurements'] = {
@@ -226,6 +299,13 @@ jobs:
               'literal_units_original_page93': summary['page93_literal_measurements'],
               'multi_line_source_tsv_verified': summary[
                   'page93_multiline_steps_tsv_validated'
+              ],
+              'source_warning_count': summary['source_notice_count'],
+              'real_page304_warning_preserved': summary[
+                  'original_page304_warning_preserved'
+              ],
+              'original_page93_independent_value_checks': summary[
+                  'independent_pdf_value_readings'
               ],
               'technical_knowledge_published': False,
               'per_page':[{
