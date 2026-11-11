@@ -20,6 +20,7 @@ import pymupdf
 
 from .ocr_layout import _best_gutter
 from .ocr_reader import _parse_words
+from .structure_candidates import PHASE_LABELS
 
 _LIST_ITEM = re.compile(r"^\s*(\d{1,3})\s*[.)]\s+\w", re.MULTILINE)
 
@@ -89,6 +90,59 @@ def _recover_vertical_list_roi(words, width: int, height: int) -> list[int] | No
     if x1 <= x0 or y1 <= y0:
         return None
     return [round(x0), round(y0), round(x1), round(y1)]
+
+
+def _phase_bounded_numbered_steps(text: str) -> list[dict]:
+    """Group observed numbered OCR lines by explicit procedure phase.
+
+    `Remove` and `Refit` are different numbered sequences even when both
+    begin with 1. Unassigned lines stay visibly unassigned. This uses only
+    exact manufacturer phase headings, never inferred phase names or AI text.
+    A side/column is always analyzed independently by the calling extractor.
+    """
+    groups: list[dict] = []
+    current: dict | None = None
+    for source_line in text.splitlines():
+        value = " ".join(source_line.split())
+        if not value:
+            continue
+        phase_key = value.strip(" :.-").casefold()
+        if phase_key in PHASE_LABELS:
+            current = {
+                "phase": PHASE_LABELS[phase_key],
+                "source_phase_heading": value,
+                "source_heading_explicit": True,
+                "steps": [],
+            }
+            groups.append(current)
+            continue
+        hit = _LIST_ITEM.match(value)
+        if not hit:
+            continue
+        if current is None:
+            current = {
+                "phase": "unassigned",
+                "source_phase_heading": None,
+                "source_heading_explicit": False,
+                "steps": [],
+            }
+            groups.append(current)
+        current["steps"].append({
+            "number": int(hit.group(1)),
+            "source_text": value,
+            "validation_state": "OCR_PROCEDURE_CANDIDATE",
+            "approved_for_ai": False,
+        })
+    for segment in groups:
+        numbers = [item["number"] for item in segment["steps"]]
+        segment["step_numbers"] = numbers
+        segment["sequence_status"] = (
+            "not_applicable" if len(numbers) < 2
+            else "contiguous" if numbers == list(range(numbers[0], numbers[0]+len(numbers)))
+            else "gaps_repeats_or_ocr_conflict"
+        )
+        segment["approved_for_technical_database"] = False
+    return [segment for segment in groups if segment["steps"]]
 
 
 def _numbered_lines(text: str) -> dict[int, str]:
@@ -296,6 +350,7 @@ def _recheck_two_column_regions(
             "text": versions[preferred]["text"],
             "numbering": versions[preferred]["numbering"],
             "versions": versions,
+            "phase_segments": _phase_bounded_numbered_steps(versions[preferred]["text"]),
             "bbox_pdf": [rect.x0, rect.y0, rect.x1, rect.y1],
             "crop_basis": "tight_original_pdf_ocr_geometry",
             "approved_for_technical_database": False,
