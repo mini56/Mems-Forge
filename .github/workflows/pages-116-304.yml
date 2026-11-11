@@ -1,4 +1,4 @@
-name: MEMS Forge - diagnostic cible pages 116 et 304
+name: MEMS Forge - 10 pages difficiles plus blanche et schema
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
           python -m pip install . pytest
-      - name: Analyser uniquement les pages physiques 116 et 304
+      - name: Analyser 12 pages choisies depuis les anomalies reelles du corpus
         shell: bash
         run: |
           python -u - <<'PY'
@@ -43,20 +43,21 @@ jobs:
           if len(sources) != 1 or sources[0].open('rb').read(4) != b'%PDF':
               raise SystemExit('ORIGINAL_482_PDF_NOT_AVAILABLE')
           original = sources[0]
-          root = Path('out/pages-116-304')
+          root = Path('out/sample-12-pages')
           root.mkdir(parents=True, exist_ok=True)
-          extracted = root / 'selected-original-pages.pdf'
+          extracted = root / 'AKM7169ENG-selected-source-pages.pdf'
+          source_pages = [7, 15, 92, 116, 129, 133, 143, 182, 271, 304, 408, 461]
           with pymupdf.open(original) as full:
               if full.page_count != 482:
                   raise SystemExit('EXPECTED_482_PAGE_ORIGINAL')
               with pymupdf.open() as selected:
-                  selected.insert_pdf(full, from_page=115, to_page=115)
-                  selected.insert_pdf(full, from_page=303, to_page=303)
+                  for source_page in source_pages:
+                      selected.insert_pdf(full, from_page=source_page-1, to_page=source_page-1)
                   selected.save(extracted)
           sha = hashlib.sha256(extracted.read_bytes()).hexdigest()
           run_full_document_audit(extracted, root / 'audit')
           items = []
-          for index, physical in ((1, 116), (2, 304)):
+          for index, physical in enumerate(source_pages, start=1):
               json_file = root / 'audit/ocr' / sha / 'pages' / f'page-{index:04d}.json'
               page = json.loads(json_file.read_text(encoding='utf-8'))
               recovered = (page.get('adaptive_extraction') or {}).get('recovered_list') or {}
@@ -103,8 +104,8 @@ jobs:
                   'source_issues': problems,
                   'validator': verdict,
               })
-          summary = {'original_pages_examined':[116,304],
-                     'original_pages_processed':2,
+          summary = {'original_pages_examined':source_pages,
+                     'original_pages_processed':len(source_pages),
                      'source_extraction':items,
                      'publication_authorized':False}
           (root / 'diagnostic.json').write_text(
@@ -117,7 +118,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mems-forge-diagnostic-116-304-${{ github.run_id }}
-          path: out/pages-116-304/diagnostic.json
+          name: mems-forge-diagnostic-sample-12-${{ github.run_id }}
+          path: out/sample-12-pages/diagnostic.json
           if-no-files-found: warn
           retention-days: 7
