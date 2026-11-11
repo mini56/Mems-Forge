@@ -157,10 +157,29 @@ def _phase_bounded_numbered_steps(text: str) -> list[dict]:
             else "contiguous" if numbers == list(range(numbers[0], numbers[0]+len(numbers)))
             else "gaps_repeats_or_ocr_conflict"
         )
+        # An unlabelled numerical sequence might be procedure steps, a parts
+        # legend, an illustration index, or a continuation from another page.
+        # It is NOT a technical procedure merely because its numbers are tidy.
+        segment["source_kind"] = (
+            "numbered_lines_under_explicit_phase"
+            if segment["source_heading_explicit"]
+            else "numbered_lines_unclassified"
+        )
         segment["review_required"] = (
-            segment.get("restart_without_recognized_phase", False)
+            not segment["source_heading_explicit"]
+            or segment.get("restart_without_recognized_phase", False)
             or segment["sequence_status"] == "gaps_repeats_or_ocr_conflict"
         )
+        segment["review_reasons"] = [
+            reason for flag, reason in (
+                (not segment["source_heading_explicit"],
+                 "numbered_lines_without_explicit_phase"),
+                (segment.get("restart_without_recognized_phase", False),
+                 "restart_without_visible_phase_heading"),
+                (segment["sequence_status"] == "gaps_repeats_or_ocr_conflict",
+                 "numbering_gap_or_ocr_conflict"),
+            ) if flag
+        ]
         segment["approved_for_technical_database"] = False
     return [segment for segment in groups if segment["steps"]]
 
