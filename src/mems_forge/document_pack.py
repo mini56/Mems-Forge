@@ -98,7 +98,7 @@ def _adaptive_ocr_evidence(page_data: dict, page_number: int) -> tuple[list, lis
     return variants, issues
 
 
-_NUMBERED_SOURCE = re.compile(r"^\\s*(\\d{1,3})\\s*[.)]\\s+\\w")
+_NUMBERED_SOURCE = re.compile(r"^\s*(\d{1,3})\s*[.)]\s+\w")
 
 
 def _anchored_source_items(page_data: dict, page_number: int) -> list[dict]:
