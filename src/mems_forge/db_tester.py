@@ -21,6 +21,7 @@ SEARCH_CONFIG: dict[str, tuple[str, ...]] = {
     "pack_ocr_variants": ("candidate_text",),
     "pack_ocr_source_items": ("source_text",),
     "pack_ocr_numbered_lines": ("source_text",),
+    "pack_ocr_page_content": ("content_kind", "inspection_status"),
 }
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "memslibrary_search": (
@@ -51,6 +52,10 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "pack_ocr_numbered_lines": (
         "segment_id", "line_index", "step_number", "source_text",
         "source_bbox_scope", "validation_state", "approved_for_ai",
+    ),
+    "pack_ocr_page_content": (
+        "page_id", "content_kind", "ocr_skipped",
+        "inspection_status", "visual_review_required", "approved_for_ai",
     ),
 }
 
