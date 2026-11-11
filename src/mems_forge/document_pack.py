@@ -256,7 +256,8 @@ def build_document_pack(
         count = {"pages": 0, "blocks": 0, "spans": 0, "image_occurrences": 0,
                  "reviews": 0, "ocr_pages": 0, "ocr_words": 0, "ocr_variants": 0,
                  "ocr_issues": 0, "ocr_source_items": 0,
-                 "ocr_numbered_segments": 0, "ocr_numbered_lines": 0}
+                 "ocr_numbered_segments": 0, "ocr_numbered_lines": 0,
+                 "ocr_page_content": 0}
         ocr_members = {}
         with closing(sqlite3.connect(database_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
@@ -396,6 +397,17 @@ def build_document_pack(
                 "approved_for_ai INTEGER NOT NULL DEFAULT 0 CHECK(approved_for_ai=0),"
                 "UNIQUE(segment_id,line_index))"
             )
+            db.execute(
+                "CREATE TABLE pack_ocr_page_content("
+                "page_id TEXT PRIMARY KEY REFERENCES pack_ocr_pages(page_id),"
+                "content_kind TEXT NOT NULL,"
+                "ocr_skipped INTEGER NOT NULL CHECK(ocr_skipped IN (0,1)),"
+                "nonwhite_ratio REAL,"
+                "inspection_status TEXT NOT NULL,"
+                "visual_review_required INTEGER NOT NULL "
+                "CHECK(visual_review_required IN (0,1)),"
+                "approved_for_ai INTEGER NOT NULL DEFAULT 0 CHECK(approved_for_ai=0))"
+            )
             if ocr_root is not None:
                 directory = Path(ocr_root) / source_sha
                 pages_dir = directory / "pages"
@@ -426,6 +438,37 @@ def build_document_pack(
                          int(bool(page_data.get("review_required"))), raw["sha256"]),
                     )
                     count["ocr_pages"] += 1
+                    visual = page_data.get("page_content")
+                    if visual is not None:
+                        if not isinstance(visual, dict):
+                            raise ValueError(f"Invalid PDF visual preflight page {n}")
+                        kind = visual.get("kind")
+                        skipped = visual.get("ocr_skipped")
+                        density = visual.get("nonwhite_ratio")
+                        words_count = len(page_data.get("words") or [])
+                        if (kind not in (
+                                "BLANK_SCAN", "RASTER_CONTENT",
+                                "SPARSE_OR_NOISE", "NATIVE_TEXT",
+                            ) or type(skipped) is not bool or
+                                (density is not None and (
+                                    not isinstance(density, (int, float)) or
+                                    not 0 <= density <= 1)) or
+                                (kind == "BLANK_SCAN" and
+                                 (not skipped or words_count)) or
+                                (skipped and kind != "BLANK_SCAN")):
+                            raise ValueError(f"Contradictory PDF visual evidence page {n}")
+                        inspection_status = (
+                            "CONFIRMED_BLANK_SCAN" if kind == "BLANK_SCAN"
+                            else "VISUAL_CONTENT_WITHOUT_OCR" if words_count == 0
+                            else "SOURCE_OCR_PRESENT"
+                        )
+                        db.execute(
+                            "INSERT INTO pack_ocr_page_content VALUES(?,?,?,?,?,?,0)",
+                            (page_id, kind, int(skipped), density,
+                             inspection_status,
+                             int(inspection_status == "VISUAL_CONTENT_WITHOUT_OCR")),
+                        )
+                        count["ocr_page_content"] += 1
                     # Enhanced OCR candidate evidence is stored independently
                     # from the original TSV. No candidate text becomes a
                     # validated technical fact merely because two modes agree.
@@ -724,6 +767,45 @@ def inspect_document_pack(path: Path) -> dict:
                                     "valid": False,
                                     "error": "ocr_numbered_line_not_from_source",
                                 }
+                    visual_status_table = db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='pack_ocr_page_content'"
+                    ).fetchone() is not None
+                    visual_pages = (db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_page_content"
+                    ).fetchone()[0] if visual_status_table else 0)
+                    malformed_visual = (db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_page_content v "
+                        "WHERE approved_for_ai<>0 OR "
+                        "(content_kind='BLANK_SCAN' AND "
+                        "(ocr_skipped<>1 OR inspection_status<>'CONFIRMED_BLANK_SCAN')) "
+                        "OR (inspection_status='VISUAL_CONTENT_WITHOUT_OCR' "
+                        "AND visual_review_required<>1)"
+                    ).fetchone()[0] if visual_status_table else 0)
+                    if visual_status_table:
+                        for (visual_page_id, kind, skipped, status, review) in db.execute(
+                            "SELECT page_id,content_kind,ocr_skipped,"
+                            "inspection_status,visual_review_required "
+                            "FROM pack_ocr_page_content"
+                        ):
+                            word_total = db.execute(
+                                "SELECT COUNT(*) FROM pack_ocr_words "
+                                "WHERE page_id=?", (visual_page_id,)
+                            ).fetchone()[0]
+                            required_status = (
+                                "CONFIRMED_BLANK_SCAN" if kind == "BLANK_SCAN"
+                                else "VISUAL_CONTENT_WITHOUT_OCR" if word_total == 0
+                                else "SOURCE_OCR_PRESENT"
+                            )
+                            if (status != required_status or
+                                    review != int(
+                                        status == "VISUAL_CONTENT_WITHOUT_OCR") or
+                                    (kind == "BLANK_SCAN" and word_total != 0) or
+                                    (kind != "BLANK_SCAN" and skipped)):
+                                return {
+                                    "valid": False,
+                                    "error": "ocr_visual_status_contradicts_source",
+                                }
                     incorrectly_approved = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_variants WHERE approved_for_ai<>0"
                     ).fetchone()[0] if table_present else 0)
@@ -780,6 +862,8 @@ def inspect_document_pack(path: Path) -> dict:
                             numbered_segments != manifest["counts"].get("ocr_numbered_segments", 0) or
                             numbered_lines != manifest["counts"].get("ocr_numbered_lines", 0) or
                             invalid_numbered_evidence or unsupported_positions or
+                            visual_pages != manifest["counts"].get("ocr_page_content", 0) or
+                            malformed_visual or
                             incorrectly_approved or
                             metadata is None or metadata[0] != "blocked_semantic_review"):
                         return {"valid": False, "error": "sqlite_validation_failed"}
