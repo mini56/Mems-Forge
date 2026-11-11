@@ -20,6 +20,7 @@ from . import __version__
 from .database import initialize_database
 from .pdf_reader import analyze_pdf, sha256_file
 from .ocr_reader import _parse_words, _words_to_text
+from .ocr_strategy_audit import _phase_bounded_numbered_steps
 
 
 def records(path: Path):
@@ -167,6 +168,62 @@ def _anchored_source_items(page_data: dict, page_number: int) -> list[dict]:
     return items
 
 
+def _numbered_column_evidence(page_data: dict, page_number: int) -> list[tuple]:
+    """Check each numbered OCR line against its parent *column OCR text*.
+
+    A readable numbered line is not necessarily a procedural instruction: it
+    may be an illustration legend or an unlabeled continuation. The column ROI
+    is the only positional evidence available; do not invent line-level boxes.
+    """
+    output = []
+    columns = ((page_data.get("adaptive_extraction") or {})
+               .get("columns") or {})
+    page_size = page_data.get("pdf_page") or {}
+    width, height = page_size.get("width_points"), page_size.get("height_points")
+    for side, reading in sorted(columns.items()):
+        if side not in ("left", "right") or not isinstance(reading, dict):
+            raise ValueError(f"Invalid numbered column on page {page_number}")
+        recorded = reading.get("phase_segments")
+        if recorded is None:  # Older raw OCR records contain no phase grouping.
+            continue
+        if not isinstance(recorded, list):
+            raise ValueError(f"Invalid OCR phase segments on page {page_number}")
+        exact = _phase_bounded_numbered_steps(str(reading.get("text") or ""))
+        if recorded != exact:
+            raise ValueError(f"OCR phase lines not derived from source on page {page_number}")
+        if not exact:
+            continue
+        bbox = reading.get("bbox_pdf")
+        if (not isinstance(bbox, list) or
+                not isinstance(width, (int, float)) or
+                not isinstance(height, (int, float)) or
+                not _bbox_within_original_ocr_region(
+                    bbox, [0, 0, float(width), float(height)],
+                    float(width), float(height),
+                )):
+            raise ValueError(f"Numbered column source geometry invalid on page {page_number}")
+        for index, group in enumerate(exact):
+            if (not group.get("steps") or
+                    group.get("approved_for_technical_database") is not False or
+                    group.get("source_kind") not in (
+                        "numbered_lines_under_explicit_phase",
+                        "numbered_lines_unclassified",
+                    ) or
+                    (not group.get("source_heading_explicit") and
+                     group.get("phase") != "unassigned") or
+                    (not group.get("source_heading_explicit") and
+                     not group.get("review_required"))):
+                raise ValueError(f"Unsafe OCR numbered phase on page {page_number}")
+            for item in group["steps"]:
+                if (item.get("approved_for_ai") is not False or
+                        item.get("validation_state") != "OCR_PROCEDURE_CANDIDATE"
+                        or not item.get("source_text") or
+                        int(item.get("number", 0)) < 1):
+                    raise ValueError(f"Unsafe numbered OCR line on page {page_number}")
+            output.append((side, index, bbox, group))
+    return output
+
+
 def build_document_pack(
     pdf_path: Path, output_path: Path, *, reader_root: Path | None = None,
     ocr_root: Path | None = None
@@ -198,7 +255,8 @@ def build_document_pack(
         document = "DOC_" + source_sha[:24]
         count = {"pages": 0, "blocks": 0, "spans": 0, "image_occurrences": 0,
                  "reviews": 0, "ocr_pages": 0, "ocr_words": 0, "ocr_variants": 0,
-                 "ocr_issues": 0, "ocr_source_items": 0}
+                 "ocr_issues": 0, "ocr_source_items": 0,
+                 "ocr_numbered_segments": 0, "ocr_numbered_lines": 0}
         ocr_members = {}
         with closing(sqlite3.connect(database_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
@@ -303,6 +361,41 @@ def build_document_pack(
                 "CHECK(approved_for_ai=0),"
                 "UNIQUE(page_id,source_number))"
             )
+            db.execute(
+                "CREATE TABLE pack_ocr_numbered_segments("
+                "segment_id TEXT PRIMARY KEY,"
+                "page_id TEXT NOT NULL REFERENCES pack_ocr_pages(page_id),"
+                "variant_id TEXT NOT NULL REFERENCES pack_ocr_variants(variant_id),"
+                "side TEXT NOT NULL CHECK(side IN ('left','right')),"
+                "segment_index INTEGER NOT NULL,"
+                "phase TEXT NOT NULL,"
+                "source_phase_heading TEXT,"
+                "source_kind TEXT NOT NULL,"
+                "source_bbox_scope TEXT NOT NULL "
+                "CHECK(source_bbox_scope='COLUMN_ROI_ONLY'),"
+                "source_bbox_pdf_json TEXT NOT NULL,"
+                "heading_explicit INTEGER NOT NULL CHECK(heading_explicit IN (0,1)),"
+                "review_required INTEGER NOT NULL CHECK(review_required IN (0,1)),"
+                "sequence_status TEXT NOT NULL,"
+                "validation_state TEXT NOT NULL DEFAULT 'unresolved' "
+                "CHECK(validation_state='unresolved'),"
+                "approved_for_ai INTEGER NOT NULL DEFAULT 0 CHECK(approved_for_ai=0),"
+                "UNIQUE(page_id,side,segment_index))"
+            )
+            db.execute(
+                "CREATE TABLE pack_ocr_numbered_lines("
+                "line_id TEXT PRIMARY KEY,"
+                "segment_id TEXT NOT NULL REFERENCES pack_ocr_numbered_segments(segment_id),"
+                "line_index INTEGER NOT NULL,"
+                "step_number INTEGER NOT NULL,"
+                "source_text TEXT NOT NULL,"
+                "source_bbox_scope TEXT NOT NULL "
+                "CHECK(source_bbox_scope='COLUMN_ROI_ONLY'),"
+                "validation_state TEXT NOT NULL DEFAULT 'unresolved' "
+                "CHECK(validation_state='unresolved'),"
+                "approved_for_ai INTEGER NOT NULL DEFAULT 0 CHECK(approved_for_ai=0),"
+                "UNIQUE(segment_id,line_index))"
+            )
             if ocr_root is not None:
                 directory = Path(ocr_root) / source_sha
                 pages_dir = directory / "pages"
@@ -337,6 +430,10 @@ def build_document_pack(
                     # from the original TSV. No candidate text becomes a
                     # validated technical fact merely because two modes agree.
                     variants, issues = _adaptive_ocr_evidence(page_data, n)
+                    indexed_variants = {
+                        region: f"{page_id}:ocrvariant:{ordinal}"
+                        for ordinal, (region, *_rest) in enumerate(variants)
+                    }
                     for ordinal, (region, method, bbox, candidate_text,
                                   crosschecked) in enumerate(variants):
                         db.execute(
@@ -353,6 +450,36 @@ def build_document_pack(
                              method, json.dumps(bbox), reason_code, "unresolved"),
                         )
                         count["ocr_issues"] += 1
+                    for side, segment_index, region_bbox, group in (
+                            _numbered_column_evidence(page_data, n)):
+                        variant = indexed_variants.get("column_" + side)
+                        if variant is None:
+                            raise ValueError(
+                                f"Numbered OCR without source variant on page {n}"
+                            )
+                        segment_id = f"{page_id}:col:{side}:segment:{segment_index}"
+                        db.execute(
+                            "INSERT INTO pack_ocr_numbered_segments VALUES("
+                            "?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
+                            (segment_id, page_id, variant, side, segment_index,
+                             group["phase"], group.get("source_phase_heading"),
+                             group["source_kind"], "COLUMN_ROI_ONLY",
+                             json.dumps(region_bbox),
+                             int(group["source_heading_explicit"]),
+                             int(group["review_required"]),
+                             group["sequence_status"], "unresolved"),
+                        )
+                        count["ocr_numbered_segments"] += 1
+                        for line_index, item in enumerate(group["steps"]):
+                            db.execute(
+                                "INSERT INTO pack_ocr_numbered_lines VALUES("
+                                "?,?,?,?,?,?,?,0)",
+                                (f"{segment_id}:line:{line_index}",
+                                 segment_id, line_index, item["number"],
+                                 item["source_text"], "COLUMN_ROI_ONLY",
+                                 "unresolved"),
+                            )
+                            count["ocr_numbered_lines"] += 1
                     anchored_items = _anchored_source_items(page_data, n)
                     for item in anchored_items:
                         number = int(item["number"])
@@ -517,6 +644,32 @@ def inspect_document_pack(path: Path) -> dict:
                         "SELECT COUNT(*) FROM pack_ocr_source_items "
                         "WHERE approved_for_ai<>0 OR validation_state<>'unresolved'"
                     ).fetchone()[0] if anchored_table_present else 0)
+                    numbered_segments = db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_numbered_segments"
+                    ).fetchone()[0]
+                    numbered_lines = db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_numbered_lines"
+                    ).fetchone()[0]
+                    invalid_numbered_evidence = (
+                        db.execute(
+                            "SELECT COUNT(*) FROM pack_ocr_numbered_segments "
+                            "WHERE validation_state<>'unresolved' "
+                            "OR approved_for_ai<>0 OR "
+                            "(heading_explicit=0 AND "
+                            "(phase<>'unassigned' OR review_required<>1))"
+                        ).fetchone()[0] +
+                        db.execute(
+                            "SELECT COUNT(*) FROM pack_ocr_numbered_lines "
+                            "WHERE validation_state<>'unresolved' OR approved_for_ai<>0"
+                        ).fetchone()[0]
+                    )
+                    # A numbered line may be searchable but has no independent
+                    # per-line source coordinates. Keep the parent column ROI
+                    # explicit so search clients cannot mistake it for a pin.
+                    unsupported_positions = db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_numbered_lines "
+                        "WHERE source_bbox_scope<>'COLUMN_ROI_ONLY'"
+                    ).fetchone()[0]
                     incorrectly_approved = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_variants WHERE approved_for_ai<>0"
                     ).fetchone()[0] if table_present else 0)
@@ -570,6 +723,9 @@ def inspect_document_pack(path: Path) -> dict:
                             ocr_issues != manifest["counts"].get("ocr_issues", 0) or
                             ocr_source_items != manifest["counts"].get("ocr_source_items", 0) or
                             bad_source_items or
+                            numbered_segments != manifest["counts"].get("ocr_numbered_segments", 0) or
+                            numbered_lines != manifest["counts"].get("ocr_numbered_lines", 0) or
+                            invalid_numbered_evidence or unsupported_positions or
                             incorrectly_approved or
                             metadata is None or metadata[0] != "blocked_semantic_review"):
                         return {"valid": False, "error": "sqlite_validation_failed"}
