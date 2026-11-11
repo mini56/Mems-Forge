@@ -236,35 +236,117 @@ def _apply_document_context(
 def _adjacency_candidates(
     page_results: list[dict[str, Any]],
     hierarchy: dict[int, dict[str, Any]],
+    structures_by_page: dict[int, dict[str, Any]] | None = None,
+    physical_page_map: dict[int, int] | None = None,
+    source_sha256: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Find plausible original-PDF continuations without merging procedures.
+
+    Merely listing fragments on consecutive sample pages is NOT evidence of a
+    continuous repair. A candidate link requires actual original physical
+    adjacency, a shared manufacturer chapter, an unambiguous previous repair
+    identity and either step progression or an explicit Refit heading.
+    """
     by_page = {int(page["page_number"]): page for page in page_results}
+    structures = structures_by_page or {}
+    real_page = physical_page_map or {number: number for number in by_page}
+    if set(real_page) != set(by_page):
+        raise ValueError("PHYSICAL_PAGE_MAPPING_INCOMPLETE")
+    if (any(type(value) is not int or value < 1 for value in real_page.values())
+            or len(set(real_page.values())) != len(real_page)
+            or [real_page[n] for n in sorted(real_page)] != sorted(real_page.values())):
+        raise ValueError("PHYSICAL_PAGE_MAPPING_NOT_STRICTLY_INCREASING")
+
     hints: list[dict[str, Any]] = []
+    inherited: dict[int, list[dict[str, Any]]] = {}
     for page_number in sorted(by_page):
         current = by_page[page_number]
-        if not current.get("fragments") or page_number <= 1:
+        previous = page_number - 1
+        if (not current.get("fragments") or previous not in by_page
+                or real_page[previous] + 1 != real_page[page_number]
+                or not _same_resolved_chapter(hierarchy, previous, page_number)):
             continue
-        if hierarchy and not _same_resolved_chapter(hierarchy, page_number - 1, page_number):
+
+        candidates: list[dict[str, Any]] = []
+        for proc in structures.get(previous, {}).get("procedures", []):
+            repair = proc.get("repair_number")
+            steps = proc.get("steps") or []
+            if not repair or not steps:
+                continue
+            last = steps[-1]
+            if not isinstance(last.get("number"), int):
+                continue
+            candidates.append({
+                "repair_number": repair,
+                "last_step": last["number"],
+                "last_phase": last.get("phase"),
+                "origin_page": previous,
+                "from_kind": "explicit_manufacturer_repair_number",
+            })
+        for inherited_link in inherited.get(previous, []):
+            candidates.append({
+                "repair_number": inherited_link["candidate_repair_number"],
+                "last_step": inherited_link["fragment_step_numbers"][-1],
+                "last_phase": inherited_link.get("candidate_phase"),
+                "origin_page": inherited_link["origin_procedure_page"],
+                "from_kind": "previous_candidate_continuation",
+            })
+        # No identity, or several plausible procedures on the preceding page:
+        # never make a speculative or potentially cross-wired linkage.
+        if len(candidates) != 1:
             continue
+        origin = candidates[0]
         for fragment in current["fragments"]:
-            evidence = ["adjacent_physical_page"]
-            if hierarchy:
-                evidence.append("same_manufacturer_chapter")
-            evidence.extend(fragment.get("context_evidence", []))
-            hints.append(
-                {
-                    "kind": "cross_page_link_candidate",
-                    "status": "REVIEW_REQUIRED",
-                    "from_page": page_number - 1,
-                    "to_page": page_number,
-                    "to_region": fragment["region"],
-                    "chapter_id": fragment.get("chapter_id"),
-                    "chapter_title_candidate": fragment.get("chapter_title_candidate"),
-                    "fragment_step_numbers": fragment["step_numbers"],
-                    "evidence": list(dict.fromkeys(evidence)),
-                    "resolved_repair_number": None,
-                    "warning": "Aucun lien de procédure n'est validé automatiquement.",
-                }
+            numbered = fragment.get("step_numbers") or []
+            if not numbered or not all(type(i) is int for i in numbered):
+                continue
+            if numbered != list(range(numbered[0], numbered[0] + len(numbered))):
+                continue
+            first = numbered[0]
+            phases = [p.get("label") for p in fragment.get("phase_markers") or []]
+            advances = first == origin["last_step"] + 1
+            explicit_refit = (
+                first == 1 and phases == ["refit"]
+                and origin["last_phase"] != "refit"
             )
+            if not (advances or explicit_refit):
+                continue
+            if fragment.get("status") != "REVIEW_REQUIRED":
+                continue
+            evidence = [
+                "adjacent_original_physical_pages",
+                "same_manufacturer_chapter_candidate",
+                origin["from_kind"],
+                "step_numbers_progress" if advances else "explicit_refit_phase_restart",
+            ]
+            hint = {
+                "kind": "cross_page_link_candidate",
+                "status": "REVIEW_REQUIRED",
+                "source_pdf_sha256": source_sha256,
+                "from_page": previous,
+                "to_page": page_number,
+                "from_original_physical_page": real_page[previous],
+                "to_original_physical_page": real_page[page_number],
+                "origin_procedure_page": origin["origin_page"],
+                "candidate_repair_number": origin["repair_number"],
+                "candidate_phase": (
+                    phases[0] if len(phases) == 1 else origin["last_phase"]
+                ),
+                "to_region": fragment.get("region"),
+                "chapter_id": hierarchy[page_number]["chapter_id"],
+                "fragment_step_numbers": numbered,
+                "fragment_source_lines": [
+                    line.get("source") for line in fragment.get("numbered_lines", [])
+                ],
+                "evidence": evidence,
+                "approved_for_ai": False,
+                "warning": (
+                    "Lien candidat uniquement. Une suite de pages ne suffit pas "
+                    "pour valider ou fusionner les instructions techniques."
+                ),
+            }
+            hints.append(hint)
+            inherited.setdefault(page_number, []).append(hint)
     return hints
 
 
@@ -273,6 +355,9 @@ def run_fragment_prototype(
     structure_root: pathlib.Path,
     output_root: pathlib.Path,
     hierarchy_root: pathlib.Path | None = None,
+    *,
+    source_pdf_sha256: str | None = None,
+    original_physical_page_map: dict[int, int] | None = None,
 ) -> dict[str, Any]:
     layout_files = sorted(pathlib.Path(layout_root).glob("*/pages/page-*.json"))
     structure_files = sorted(pathlib.Path(structure_root).glob("*/pages/page-*.json"))
@@ -315,7 +400,10 @@ def run_fragment_prototype(
             encoding="utf-8",
         )
 
-    hints = _adjacency_candidates(results, hierarchy)
+    hints = _adjacency_candidates(
+        results, hierarchy, structures_by_page,
+        original_physical_page_map, source_pdf_sha256,
+    )
     raw_count = sum(int(page.get("raw_fragment_count", page.get("fragment_count", 0))) for page in results)
     retained_count = sum(int(page["fragment_count"]) for page in results)
     summary = {
@@ -327,6 +415,15 @@ def run_fragment_prototype(
         "fragment_pages": [page["page_number"] for page in results if page["fragment_count"]],
         "cross_page_link_candidate_count": len(hints),
         "cross_page_link_candidates": hints,
+        "source_pdf_sha256": source_pdf_sha256,
+        "original_physical_page_map": {
+            str(k): v for k, v in sorted(
+                (original_physical_page_map or {
+                    n: n for n in structures_by_page
+                }).items()
+            )
+        },
+        "automatic_procedure_merges": 0,
         "hierarchy_context_used": bool(hierarchy),
         "publication_gate": (
             "BLOCKED_REVIEW"
