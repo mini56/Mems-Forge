@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 from collections import defaultdict
 from typing import Any
 
 from mems_forge.structure_candidates import PHASE_LABELS, REPAIR_NO_RE, STEP_RE, _normalise_space
 
-FRAGMENT_VERSION = "0.2.0"
+FRAGMENT_VERSION = "0.3.0"
 
 
 def _phase_from_line(text: str) -> tuple[str, str] | None:
@@ -28,6 +29,65 @@ def _line_ref(line: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_UNIT_VALUE_RE = re.compile(
+    r"(?<![\w.])(?P<number>\d+(?:[.,]\d+)?)\s+"
+    r"(?P<unit>Nm|N·m|mm|kPa|bar|mV|V|A|Ω|°C|rpm|kg)\b"
+)
+
+
+def _measured_value_candidates(text: str) -> list[dict[str, Any]]:
+    """Preserve OCR unit mentions verbatim; neither calibrate nor validate."""
+    return [
+        {
+            "source_text": match.group(),
+            "numeric_text": match.group("number"),
+            "unit_text": match.group("unit"),
+            "verification_state": "OCR_CANDIDATE_UNVERIFIED",
+            "approved_for_ai": False,
+        }
+        for match in _UNIT_VALUE_RE.finditer(text)
+    ]
+
+
+def _is_plausible_step_continuation(
+    first: dict[str, Any],
+    previous: dict[str, Any],
+    following: dict[str, Any],
+    text: str,
+) -> bool:
+    """Require contiguous, indented OCR text in the same original column.
+
+    Drawings, tool identifiers, new procedure headings and notes remain source
+    evidence but are never silently appended as a technical instruction.
+    """
+    if not text or STEP_RE.match(text) or _phase_from_line(text) is not None:
+        return False
+    if REPAIR_NO_RE.search(text) or re.match(
+        r"^(?:WARNING|CAUTION|NOTE)\s*:", text, re.IGNORECASE
+    ):
+        return False
+    if re.fullmatch(r"\d+[A-Z]\d{3,6}", text):
+        return False
+    letters = [x for x in text if x.isalpha()]
+    if len(letters) >= 5 and sum(x.isupper() for x in letters) / len(letters) > 0.9:
+        return False
+    initial, last, upcoming = (
+        item.get("bbox") for item in (first, previous, following)
+    )
+    if any(not isinstance(box, list) or len(box) != 4 for box in
+           (initial, last, upcoming)):
+        return False
+    if not (initial[0] <= upcoming[0] <= initial[2] and
+            upcoming[1] >= last[1] and
+            -3 <= upcoming[1] - last[3] <= 24):
+        return False
+    # Continuation text is typically inset from the numbered step label.
+    # A new flush-left line might be a caption or a separate instruction.
+    if upcoming[0] < initial[0] + 12:
+        return False
+    return True
+
+
 def _region_fragments(layout: dict[str, Any], structure: dict[str, Any]) -> list[dict[str, Any]]:
     page_number = int(layout["page_number"])
     complete_regions = {str(proc.get("region")) for proc in structure.get("procedures", [])}
@@ -41,33 +101,66 @@ def _region_fragments(layout: dict[str, Any], structure: dict[str, Any]) -> list
 
     results: list[dict[str, Any]] = []
     for region, lines in by_region.items():
-        if any(REPAIR_NO_RE.search(_normalise_space(str(line.get("text", "")))) for line in lines):
+        if any(REPAIR_NO_RE.search(_normalise_space(str(line.get("text", ""))))
+               for line in lines):
             continue
         if region in complete_regions:
             continue
 
         numbered: list[dict[str, Any]] = []
         phase_markers: list[dict[str, Any]] = []
+        orphan_lines: list[dict[str, Any]] = []
+        current_step: dict[str, Any] | None = None
+        current_first: dict[str, Any] | None = None
+        current_last: dict[str, Any] | None = None
         for line in lines:
             text = _normalise_space(str(line.get("text", "")))
+            if not text:
+                continue
             phase = _phase_from_line(text)
             if phase is not None:
-                phase_markers.append(
-                    {
-                        "label": phase[0],
-                        "source_label": phase[1],
-                        "source": _line_ref(line),
-                    }
-                )
+                phase_markers.append({
+                    "label": phase[0],
+                    "source_label": phase[1],
+                    "source": _line_ref(line),
+                })
+                current_step = None
+                current_first = None
+                current_last = None
+                continue
             match = STEP_RE.match(text)
             if match:
-                numbered.append(
-                    {
-                        "number": int(match.group(1)),
-                        "text": match.group(2).strip(),
-                        "source": _line_ref(line),
-                    }
-                )
+                first_source = _line_ref(line)
+                current_step = {
+                    "number": int(match.group(1)),
+                    "text": match.group(2).strip(),
+                    "source": first_source,
+                    "source_lines": [first_source],
+                    "source_line_count": 1,
+                    "measurement_mentions": [],
+                    "validation_state": "OCR_MULTILINE_CANDIDATE_UNVERIFIED",
+                    "approved_for_ai": False,
+                }
+                numbered.append(current_step)
+                current_first = line
+                current_last = line
+                continue
+            if (current_step is not None and current_first is not None
+                    and current_last is not None
+                    and _is_plausible_step_continuation(
+                        current_first, current_last, line, text
+                    )):
+                current_step["text"] = (current_step["text"] + " " + text).strip()
+                current_step["source_lines"].append(_line_ref(line))
+                current_step["source_line_count"] += 1
+                current_last = line
+            else:
+                orphan_lines.append(_line_ref(line))
+                # Do not append an isolated caption to the following numbered
+                # step. The original OCR remains available for human review.
+                current_step = None
+                current_first = None
+                current_last = None
 
         if len(numbered) < 2:
             continue
@@ -78,31 +171,35 @@ def _region_fragments(layout: dict[str, Any], structure: dict[str, Any]) -> list
         if not has_phase_marker and not starts_after_one:
             continue
 
+        for item in numbered:
+            item["measurement_mentions"] = _measured_value_candidates(item["text"])
         reasons = ["no_local_service_repair_number"]
         if has_phase_marker:
             reasons.append("procedure_phase_heading_present")
         if starts_after_one:
             reasons.append("numbering_starts_after_one")
 
-        results.append(
-            {
-                "fragment_version": FRAGMENT_VERSION,
-                "kind": "continuation_fragment_candidate",
-                "status": "REVIEW_REQUIRED",
-                "page_number": page_number,
-                "region": region,
-                "step_numbers": numbers,
-                "first_step_number": numbers[0],
-                "last_step_number": numbers[-1],
-                "phase_markers": phase_markers,
-                "numbered_lines": numbered,
-                "evidence": reasons,
-                "warning": (
-                    "Fragment sans identité locale. Il ne doit jamais être fusionné "
-                    "automatiquement avec une procédure de la page précédente."
-                ),
-            }
-        )
+        results.append({
+            "fragment_version": FRAGMENT_VERSION,
+            "kind": "continuation_fragment_candidate",
+            "status": "REVIEW_REQUIRED",
+            "page_number": page_number,
+            "region": region,
+            "step_numbers": numbers,
+            "first_step_number": numbers[0],
+            "last_step_number": numbers[-1],
+            "phase_markers": phase_markers,
+            "numbered_lines": numbered,
+            "unassigned_ocr_lines": orphan_lines,
+            "source_completeness": (
+                "MULTILINE_OCR_CANDIDATE_UNVERIFIED"
+            ),
+            "evidence": reasons,
+            "warning": (
+                "Chaque ligne conservée est une hypothèse de lecture OCR, "
+                "jamais une consigne de réparation certifiée."
+            ),
+        })
 
     return results
 
@@ -389,6 +486,20 @@ def _adjacency_candidates(
                 "fragment_step_numbers": numbered,
                 "fragment_source_lines": [
                     line.get("source") for line in fragment.get("numbered_lines", [])
+                ],
+                "fragment_complete_steps": [
+                    {
+                        "number": step["number"],
+                        "text": step["text"],
+                        "source_lines": step.get("source_lines") or [step["source"]],
+                        "source_line_count": len(
+                            step.get("source_lines") or [step["source"]]
+                        ),
+                        "measurement_mentions": step.get("measurement_mentions") or [],
+                        "validation_state": "OCR_MULTILINE_CANDIDATE_UNVERIFIED",
+                        "approved_for_ai": False,
+                    }
+                    for step in fragment.get("numbered_lines", [])
                 ],
                 "evidence": evidence,
                 "approved_for_ai": False,
