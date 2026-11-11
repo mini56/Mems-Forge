@@ -224,9 +224,99 @@ def _numbered_column_evidence(page_data: dict, page_number: int) -> list[tuple]:
     return output
 
 
+def _review_only_cross_page_links(
+    fragment_root: Path | None, source_sha: str, page_count: int,
+) -> list[dict]:
+    """Import only physically adjacent, source-identified review candidates.
+
+    This is intentionally NOT a procedural reconstruction. The result may be
+    inspected in SQLite but can never become an approved technical instruction.
+    """
+    if fragment_root is None:
+        return []
+    path = Path(fragment_root) / "summary.json"
+    if not path.is_file():
+        raise ValueError("CONTINUATION_EVIDENCE_REPORT_MISSING")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if (report.get("source_pdf_sha256") != source_sha or
+            report.get("automatic_procedure_merges") != 0 or
+            report.get("publication_gate") not in (
+                "BLOCKED_REVIEW", "NO_FRAGMENT_BLOCKER"
+            )):
+        raise ValueError("CONTINUATION_EVIDENCE_PROVENANCE_MISMATCH")
+    page_map = report.get("original_physical_page_map") or {}
+    if (set(page_map) != {str(n) for n in range(1, page_count + 1)} or
+            any(type(v) is not int or v < 1 for v in page_map.values()) or
+            list(page_map.values()) != sorted(set(page_map.values()))):
+        raise ValueError("CONTINUATION_PHYSICAL_PAGE_MAP_INVALID")
+    links = report.get("cross_page_link_candidates") or []
+    if (not isinstance(links, list) or
+            len(links) != report.get("cross_page_link_candidate_count")):
+        raise ValueError("CONTINUATION_CANDIDATE_COUNT_MISMATCH")
+    result = []
+    seen = set()
+    for link in links:
+        start, end = link.get("from_page"), link.get("to_page")
+        if (type(start) is not int or type(end) is not int
+                or not 1 <= start < end <= page_count or end != start + 1
+                or page_map[str(start)] + 1 != page_map[str(end)]
+                or link.get("source_pdf_sha256") != source_sha
+                or link.get("from_original_physical_page") != page_map[str(start)]
+                or link.get("to_original_physical_page") != page_map[str(end)]
+                or link.get("status") != "REVIEW_REQUIRED"
+                or link.get("approved_for_ai") is not False
+                or not isinstance(link.get("chapter_id"), str)
+                or not link["chapter_id"]
+                or not isinstance(link.get("candidate_repair_number"), str)
+                or not re.fullmatch(
+                    r"[0-9]+(?:\\.[0-9]+){1,4}",
+                    link["candidate_repair_number"]
+                )
+                or link.get("to_region") not in ("left", "right", "body")
+                or link.get("origin_procedure_page", 0) > start
+                or "adjacent_original_physical_pages" not in link.get("evidence", [])
+                or "same_manufacturer_chapter_candidate" not in link.get("evidence", [])):
+            raise ValueError("CONTINUATION_CANDIDATE_UNSAFE_SOURCE")
+        numbers = link.get("fragment_step_numbers")
+        source_lines = link.get("fragment_source_lines")
+        if (not isinstance(numbers, list) or not numbers
+                or any(type(v) is not int for v in numbers)
+                or numbers != list(range(numbers[0], numbers[0] + len(numbers)))
+                or not isinstance(source_lines, list)
+                or len(source_lines) != len(numbers)
+                or any(not isinstance(item, dict) or
+                       not isinstance(item.get("source_line_key"), list) or
+                       not isinstance(item.get("bbox"), list) or
+                       len(item.get("bbox")) != 4 or
+                       not str(item.get("text", "")).strip()
+                       for item in source_lines)):
+            raise ValueError("CONTINUATION_CANDIDATE_UNTRACED_STEPS")
+        # Every link must match the extracted fragment of that *same* page.
+        detail = Path(fragment_root) / source_sha / "pages" / f"page-{end:04d}.json"
+        if not detail.is_file():
+            raise ValueError("CONTINUATION_PAGE_EVIDENCE_MISSING")
+        page = json.loads(detail.read_text(encoding="utf-8"))
+        matches = [
+            fragment for fragment in page.get("fragments", [])
+            if fragment.get("region") == link["to_region"]
+            and fragment.get("step_numbers") == numbers
+            and [i.get("source") for i in fragment.get("numbered_lines", [])]
+            == source_lines
+        ]
+        if len(matches) != 1:
+            raise ValueError("CONTINUATION_NOT_GROUNDED_IN_OCR_FRAGMENT")
+        key = (start, end, link["to_region"], tuple(numbers))
+        if key in seen:
+            raise ValueError("DUPLICATE_PROCEDURE_CONTINUATION")
+        seen.add(key)
+        result.append(link)
+    return result
+
+
 def build_document_pack(
     pdf_path: Path, output_path: Path, *, reader_root: Path | None = None,
-    ocr_root: Path | None = None
+    ocr_root: Path | None = None,
+    fragment_root: Path | None = None,
 ) -> dict:
     """Produce a candidate pack only, never modify the published database."""
     pdf_path = Path(pdf_path)
@@ -257,7 +347,7 @@ def build_document_pack(
                  "reviews": 0, "ocr_pages": 0, "ocr_words": 0, "ocr_variants": 0,
                  "ocr_issues": 0, "ocr_source_items": 0,
                  "ocr_numbered_segments": 0, "ocr_numbered_lines": 0,
-                 "ocr_page_content": 0}
+                 "ocr_page_content": 0, "procedure_continuation_candidates": 0}
         ocr_members = {}
         with closing(sqlite3.connect(database_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
@@ -543,6 +633,41 @@ def build_document_pack(
                         )
                         count["ocr_words"] += 1
             db.execute(
+                "CREATE TABLE pack_procedure_continuation_candidates("
+                "candidate_id TEXT PRIMARY KEY,"
+                "from_page_id TEXT NOT NULL REFERENCES source_pages(page_id),"
+                "to_page_id TEXT NOT NULL REFERENCES source_pages(page_id),"
+                "from_original_page INTEGER NOT NULL,"
+                "to_original_page INTEGER NOT NULL,"
+                "candidate_repair_number TEXT NOT NULL,"
+                "chapter_id TEXT NOT NULL,"
+                "to_region TEXT NOT NULL,"
+                "step_numbers_json TEXT NOT NULL,"
+                "source_lines_json TEXT NOT NULL,"
+                "evidence_json TEXT NOT NULL,"
+                "validation_state TEXT NOT NULL DEFAULT 'unresolved' "
+                "CHECK(validation_state='unresolved'),"
+                "approved_for_ai INTEGER NOT NULL DEFAULT 0 CHECK(approved_for_ai=0))"
+            )
+            for index, candidate in enumerate(_review_only_cross_page_links(
+                fragment_root, source_sha, expected_pages,
+            )):
+                db.execute(
+                    "INSERT INTO pack_procedure_continuation_candidates "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?, 'unresolved', 0)",
+                    (f"{revision}:continuation:{index}",
+                     f"{revision}:p{candidate['from_page']}",
+                     f"{revision}:p{candidate['to_page']}",
+                     candidate["from_original_physical_page"],
+                     candidate["to_original_physical_page"],
+                     candidate["candidate_repair_number"],
+                     candidate["chapter_id"], candidate["to_region"],
+                     json.dumps(candidate["fragment_step_numbers"]),
+                     json.dumps(candidate["fragment_source_lines"]),
+                     json.dumps(candidate["evidence"])),
+                )
+                count["procedure_continuation_candidates"] += 1
+            db.execute(
                 "CREATE TABLE pack_image_occurrences("
                 "revision_id TEXT NOT NULL,page_number INTEGER NOT NULL,"
                 "image_index INTEGER NOT NULL,sha256_or_digest TEXT,"
@@ -806,6 +931,21 @@ def inspect_document_pack(path: Path) -> dict:
                                     "valid": False,
                                     "error": "ocr_visual_status_contradicts_source",
                                 }
+                    has_continuation_index = db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='pack_procedure_continuation_candidates'"
+                    ).fetchone() is not None
+                    continuation_count = (db.execute(
+                        "SELECT COUNT(*) FROM pack_procedure_continuation_candidates"
+                    ).fetchone()[0] if has_continuation_index else 0)
+                    invalid_continuations = (db.execute(
+                        "SELECT COUNT(*) FROM pack_procedure_continuation_candidates c "
+                        "JOIN source_pages p ON c.from_page_id=p.page_id "
+                        "JOIN source_pages q ON c.to_page_id=q.page_id "
+                        "WHERE c.validation_state<>'unresolved' OR c.approved_for_ai<>0 "
+                        "OR q.physical_page_number<>p.physical_page_number+1 "
+                        "OR c.to_original_page<>c.from_original_page+1"
+                    ).fetchone()[0] if has_continuation_index else 0)
                     incorrectly_approved = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_variants WHERE approved_for_ai<>0"
                     ).fetchone()[0] if table_present else 0)
@@ -864,6 +1004,8 @@ def inspect_document_pack(path: Path) -> dict:
                             invalid_numbered_evidence or unsupported_positions or
                             visual_pages != manifest["counts"].get("ocr_page_content", 0) or
                             malformed_visual or
+                            continuation_count != manifest["counts"].get("procedure_continuation_candidates", 0) or
+                            invalid_continuations or
                             incorrectly_approved or
                             metadata is None or metadata[0] != "blocked_semantic_review"):
                         return {"valid": False, "error": "sqlite_validation_failed"}
