@@ -103,6 +103,51 @@ def _numbered_lines(text: str) -> dict[int, str]:
     return items
 
 
+def _numbered_lines_with_pdf_bboxes(
+    tsv: str, page_number: int, crop: pymupdf.Rect, dpi: int,
+) -> tuple[list[dict], list[dict]]:
+    """Reconstruct numbered-line coordinates FROM OCR words on source pixels.
+
+    Model-generated positions are not accepted. Every line comes from the
+    TIFF/PNG crop of the same immutable original PDF page. These are OCR
+    candidate anchors, never a technical semantic validation.
+    """
+    words, parse_warnings = _parse_words(tsv, page_number)
+    if parse_warnings:
+        return [], parse_warnings
+    groups: dict[tuple[int, int, int], list] = {}
+    for word in words:
+        key = (word.block_num, word.par_num, word.line_num)
+        groups.setdefault(key, []).append(word)
+    scale = dpi / 72.0
+    found = []
+    for line_words in groups.values():
+        if not line_words:
+            continue
+        text = " ".join(w.text for w in line_words).strip()
+        match = _LIST_ITEM.match(text)
+        if not match:
+            continue
+        x0 = crop.x0 + min(w.left for w in line_words) / scale
+        y0 = crop.y0 + min(w.top for w in line_words) / scale
+        x1 = crop.x0 + max(w.left + w.width for w in line_words) / scale
+        y1 = crop.y0 + max(w.top + w.height for w in line_words) / scale
+        # Individual bounding boxes must stay inside their original crop.
+        if (x0 < crop.x0 - 1 or y0 < crop.y0 - 1 or
+                x1 > crop.x1 + 1 or y1 > crop.y1 + 1 or
+                x0 >= x1 or y0 >= y1):
+            return [], [{"code": "REGIONAL_OCR_BBOX_OUTSIDE_SOURCE"}]
+        found.append({
+            "number": int(match.group(1)),
+            "source_text": text,
+            "bbox_pdf": [x0, y0, x1, y1],
+            "source": "original_pdf_tesseract_400dpi_tsv",
+            "validation_state": "OCR_LOCATION_CANDIDATE",
+            "approved_for_ai": False,
+        })
+    return found, []
+
+
 def _recover_list_with_two_resolutions(
     page, primary_words, image_width: int, image_height: int,
     language: str, directory: Path, primary_dpi: int,
@@ -130,9 +175,18 @@ def _recover_list_with_two_resolutions(
         filename = directory / f"collapsed-list-{dpi}.png"
         pix.save(filename)
         content = _ocr(filename, language, 6)
+        anchored = []
+        anchor_warnings = []
+        if dpi == 400:
+            tsv = _ocr(filename, language, 6, tsv=True)
+            anchored, anchor_warnings = _numbered_lines_with_pdf_bboxes(
+                tsv, page.number + 1, pdf_rect, dpi,
+            )
         variants[str(dpi)] = {
             "text": content, "numbering": _numbers(content),
             "lines": _numbered_lines(content),
+            "anchors": anchored,
+            "anchor_warnings": anchor_warnings,
         }
     smaller, larger = variants["200"], variants["400"]
     first = smaller["numbering"]
@@ -146,8 +200,20 @@ def _recover_list_with_two_resolutions(
         and smaller["lines"] == larger["lines"]
         and len(smaller["lines"]) == first["count"]
     )
+    anchors = larger["anchors"]
+    anchor_labels = {item["number"]: item["source_text"] for item in anchors}
+    anchors_consistent = bool(
+        consistent and not larger["anchor_warnings"]
+        and len(anchors) == len(larger["lines"])
+        and anchor_labels == larger["lines"]
+        and [item["number"] for item in anchors] == first["numbers"]
+    )
     return {
         "roi_pdf": [pdf_rect.x0, pdf_rect.y0, pdf_rect.x1, pdf_rect.y1],
+        "anchored_items": anchors if anchors_consistent else [],
+        "anchored_item_count": len(anchors) if anchors_consistent else 0,
+        "ocr_locations_crosschecked": anchors_consistent,
+        "ocr_anchor_issues": larger["anchor_warnings"] if not anchors_consistent else [],
         "roi_source": "vertical_collapsed_ocr_geometry",
         "resolution_dpi": [200, 400],
         "numbering": first,
