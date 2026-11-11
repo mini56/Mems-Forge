@@ -167,6 +167,17 @@ jobs:
                   raise SystemExit('SAFETY_NOTICE_MANIFEST_AND_SQLITE_DISAGREE')
           summary['source_notice_count'] = len(notices)
           summary['original_page304_warning_preserved'] = bool(matched_page304)
+          summary['source_notices_for_review'] = [
+              {
+                  'original_page': item[0],
+                  'kind': item[1],
+                  'region': item[2],
+                  'source_text': item[3],
+                  'source_line_count': item[4],
+                  'approved_for_ai': False,
+              }
+              for item in notices
+          ]
           # Independent render and fresh OCR probes on original physical
           # page 93. These are source-reading checks, NOT a semantic approval.
           expected_values = {3: '0.152 mm', 8: '88 Nm', 9: '22 Nm'}
@@ -301,6 +312,7 @@ jobs:
                   'page93_multiline_steps_tsv_validated'
               ],
               'source_warning_count': summary['source_notice_count'],
+              'original_notice_evidence': summary['source_notices_for_review'][:15],
               'real_page304_warning_preserved': summary[
                   'original_page304_warning_preserved'
               ],
