@@ -68,6 +68,20 @@ def build_parser() -> argparse.ArgumentParser:
     source_audit.add_argument("path", type=Path)
     source_audit.add_argument("--report", type=Path)
 
+    vision = sub.add_parser(
+        "ai-read-page",
+        help="Use a running LOCAL vision model on the original PDF page; "
+             "produces evidence candidates only, never updates the active base",
+    )
+    vision.add_argument("--pdf", type=Path, required=True)
+    vision.add_argument("--page", type=int, required=True)
+    vision.add_argument("--model", required=True,
+                        help="Name of an already installed local Ollama vision model")
+    vision.add_argument("--endpoint", default="http://127.0.0.1:11434")
+    vision.add_argument("--report", type=Path, required=True)
+    vision.add_argument("--ocr-page", type=Path,
+                        help="Optional page-NNNN.json produced by MEMS Forge OCR")
+
     stage = sub.add_parser(
         "stage-pack",
         help="Integrity-checked offline preview installation; NEVER changes application or AI",
@@ -132,6 +146,33 @@ def main() -> int:
                   else audit_source_pack(args.path))
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["native_source_parity_ok"] else 2
+
+    if args.command == "ai-read-page":
+        from .local_vision_ai import write_page_report
+        evidence = []
+        if args.ocr_page:
+            ocr = json.loads(args.ocr_page.read_text(encoding="utf-8"))
+            if int(ocr.get("page_number", -1)) != args.page:
+                raise ValueError("AI_OCR_PAGE_ID_MISMATCH")
+            evidence = [
+                str(ocr.get("text") or ""),
+                *[str(candidate.get("text") or "")
+                  for candidate in (ocr.get("adaptive_extraction") or {})
+                  .get("columns", {}).values()],
+            ]
+        report = write_page_report(
+            args.pdf, args.page, args.report, model=args.model,
+            endpoint=args.endpoint, ocr_evidence=evidence,
+        )
+        print(json.dumps({
+            "page": report["physical_page"],
+            "items": len(report["items"]),
+            "uncertainties": len(report["uncertainties"]),
+            "model_called": report["local_model_invoked"],
+            "published": report["approved_for_publication"],
+            "report": str(args.report),
+        }, ensure_ascii=False, indent=2))
+        return 0
 
     if args.command == "search-all":
         from .local_update import search_all_sources
