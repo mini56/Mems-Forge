@@ -1,0 +1,100 @@
+name: MEMS Forge — verifier sources et geometrie de la vraie IA
+
+on:
+  push:
+    branches: [feature/source-evidence-validation-20261110]
+    paths: ['.github/workflows/vision-source-crosscheck.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verifier-ai-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: PDF original par LFS
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Installer MEMS Forge et Tesseract
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          python -m pip install .
+
+      - name: Recuperer la vraie proposition du run IA, sans nouvelle inference
+        uses: actions/download-artifact@v4
+        with:
+          name: mems-forge-vision-page-116-42986512341
+          run-id: 42986512341
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: out/vision-candidate
+
+      - name: Confronter les propositions IA a l'OCR d'origine et aux positions
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import subprocess
+          import tempfile
+          import pymupdf
+          from mems_forge.vision_ocr_location_audit import write_location_audit
+
+          pdf=next(pathlib.Path('depot').rglob('*.pdf'))
+          report=json.loads(pathlib.Path('out/vision-candidate/page-0116.json').read_text())
+          sha=hashlib.sha256(pdf.read_bytes()).hexdigest()
+          if sha != report['source_pdf_sha256']:
+              raise SystemExit('MODEL_REPORT_NOT_FROM_ORIGINAL_PDF')
+          with pymupdf.open(pdf) as doc:
+              if doc.page_count != 482:
+                  raise SystemExit('SOURCE_PDF_PAGE_COUNT_MISMATCH')
+              pix=doc[115].get_pixmap(
+                  matrix=pymupdf.Matrix(200/72,200/72),
+                  colorspace=pymupdf.csGRAY,alpha=False,
+              )
+          with tempfile.TemporaryDirectory() as tmp:
+              image=pathlib.Path(tmp)/'original-116.png'
+              pix.save(image)
+              ocr=subprocess.run(
+                  ['tesseract',str(image),'stdout','-l','eng','--psm','6','tsv'],
+                  capture_output=True,text=True,check=True,
+              )
+          audit=write_location_audit(
+              report,ocr.stdout,
+              pathlib.Path('out/vision-verified/location-audit.json'),
+              render_width=pix.width,render_height=pix.height,
+          )
+          verdict={
+              'page':116,
+              'model_proposals':len(report['items']),
+              'quotes_confirmed_by_separate_ocr':sum(
+                  x['source_quote_matches']==1 for x in audit['items']
+              ),
+              'geometry_conflicts':audit['location_conflicts'],
+              'unmatched_or_ambiguous_quotes':audit['ocr_unmatched_quotes'],
+              'approved_for_publication':False,
+              'report':'out/vision-verified/location-audit.json',
+          }
+          print('MEMS_FORGE_ORIGINAL_VISION_OCR_VERDICT='+json.dumps(verdict,ensure_ascii=False))
+          if not audit['items']:
+              raise SystemExit('NO_REAL_VISION_CANDIDATES_TO_VERIFY')
+          PY
+
+      - name: Publier seulement le rapport de verif, jamais le PDF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-vision-source-verification-${{ github.run_id }}
+          path: out/vision-verified/
+          if-no-files-found: warn
+          retention-days: 7
