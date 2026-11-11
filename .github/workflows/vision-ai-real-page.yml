@@ -86,7 +86,7 @@ jobs:
           model = os.environ["MEMS_VISION_MODEL"]
           report = write_page_report(
               source, 116, Path("out/vision-candidate/page-0116.json"),
-              model=model,
+              model=model, timeout=600, max_items=5,
           )
           if not report["local_model_invoked"]:
               raise SystemExit("VISION_MODEL_NOT_INVOKED")
@@ -96,6 +96,8 @@ jobs:
               "page": 116,
               "model": model,
               "real_model_invoked": report["local_model_invoked"],
+              "extraction_scope": report["extraction_scope"],
+              "pilot_item_limit": report["pilot_item_limit"],
               "page_class": report["page_type"],
               "proposed_items": len(report["items"]),
               "uncertainties": len(report["uncertainties"]),
