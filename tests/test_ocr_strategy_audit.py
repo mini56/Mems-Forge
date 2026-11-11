@@ -53,3 +53,46 @@ def test_list_positions_come_from_original_pdf_tsv_not_ai():
         50 + 42 * 72 / 400,
     ]
     assert all(item["approved_for_ai"] is False for item in items)
+
+
+def test_remove_refit_numbering_restarthas_independent_phase_segments():
+    from mems_forge.ocr_strategy_audit import _phase_bounded_numbered_steps
+    text = (
+        "Remove\n"
+        "1. Undo damper fixing\n"
+        "2. Remove damper\n"
+        "Refit\n"
+        "1. Position damper\n"
+        "2. Tighten mounting\n"
+    )
+    segments = _phase_bounded_numbered_steps(text)
+    assert [(s["phase"], s["step_numbers"], s["sequence_status"])
+            for s in segments] == [
+        ("remove", [1, 2], "contiguous"),
+        ("refit", [1, 2], "contiguous"),
+    ]
+    assert all(not s["approved_for_technical_database"] for s in segments)
+    assert all(not step["approved_for_ai"]
+               for seg in segments for step in seg["steps"])
+
+
+def test_unassigned_numbers_never_receive_invented_phase():
+    from mems_forge.ocr_strategy_audit import _phase_bounded_numbered_steps
+    segments = _phase_bounded_numbered_steps(
+        "1. Left column diagram callout\n2. Other source text\nRefit\n"
+        "1. Fit part\n"
+    )
+    assert [s["phase"] for s in segments] == ["unassigned", "refit"]
+    assert not segments[0]["source_heading_explicit"]
+    assert segments[0]["step_numbers"] == [1, 2]
+
+
+def test_non_contiguous_steps_still_report_unresolved_error():
+    from mems_forge.ocr_strategy_audit import _phase_bounded_numbered_steps
+    segments = _phase_bounded_numbered_steps("Remove\n1. Start\n3. End\n")
+    assert segments[0]["sequence_status"] == "gaps_repeats_or_ocr_conflict"
+
+
+def test_image_callout_numbers_without_sentence_are_not_steps():
+    from mems_forge.ocr_strategy_audit import _phase_bounded_numbered_steps
+    assert _phase_bounded_numbered_steps("1\n2\n3\n") == []
