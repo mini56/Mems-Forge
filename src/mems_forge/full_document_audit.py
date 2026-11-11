@@ -164,10 +164,17 @@ def _run_full_ocr(
                 adaptive_failure = f"{type(exc).__name__}: {exc}"
 
             review_reasons: list[str] = []
-            empty_adaptive_regions = sorted(
-                region for region, entry in (adaptive or {}).get("columns", {}).items()
+            # Record the exact source-region identity expected by the SQLite
+            # candidate builder. Empty image-region OCR is an unresolved issue,
+            # not an invented reading and not grounds for discarding the PDF.
+            empty_adaptive_regions = sorted([
+                "column_" + region
+                for region, entry in (adaptive or {}).get("columns", {}).items()
                 if not str(entry.get("text") or "").strip()
-            )
+            ] + (["recovered_numbered_list"]
+                 if (adaptive and adaptive.get("recovered_list")
+                     and not str(adaptive["recovered_list"].get("candidate_text") or "").strip())
+                 else []))
             if empty_adaptive_regions:
                 review_reasons.append("adaptive_region_without_text")
             if adaptive_failure is not None:
