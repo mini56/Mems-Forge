@@ -21,6 +21,8 @@ from .database import initialize_database
 from .pdf_reader import analyze_pdf, sha256_file
 from .ocr_reader import _parse_words, _words_to_text
 from .ocr_strategy_audit import _phase_bounded_numbered_steps
+from .structure_candidates import STEP_RE, _normalise_space
+from .procedure_fragments import _measured_value_candidates
 
 
 def records(path: Path):
@@ -325,6 +327,41 @@ def _review_only_cross_page_links(
         ]
         if len(matches) != 1:
             raise ValueError("CONTINUATION_NOT_GROUNDED_IN_OCR_FRAGMENT")
+        full_steps = link.get("fragment_complete_steps")
+        if (not isinstance(full_steps, list) or len(full_steps) != len(numbers)):
+            raise ValueError("CONTINUATION_COMPLETE_STEPS_MISSING")
+        for index, (item, original_step) in enumerate(zip(
+            full_steps, matches[0]["numbered_lines"]
+        )):
+            origins = original_step.get("source_lines") or [original_step["source"]]
+            if (type(item.get("number")) is not int
+                    or item["number"] != numbers[index]
+                    or item["number"] != original_step["number"]
+                    or item.get("text") != original_step.get("text")
+                    or item.get("source_lines") != origins
+                    or item.get("source_line_count") != len(origins)
+                    or item.get("validation_state")
+                    != "OCR_MULTILINE_CANDIDATE_UNVERIFIED"
+                    or item.get("approved_for_ai") is not False
+                    or item.get("measurement_mentions") !=
+                    _measured_value_candidates(item["text"])):
+                raise ValueError("CONTINUATION_STEP_SOURCE_TEXT_CONFLICT")
+            for pos, source_line in enumerate(origins):
+                match = STEP_RE.match(str(source_line.get("text", ""))) if pos == 0 else None
+                if (not isinstance(source_line.get("source_line_key"), list)
+                        or len(source_line["source_line_key"]) != 3
+                        or not isinstance(source_line.get("bbox"), list)
+                        or len(source_line["bbox"]) != 4
+                        or source_line.get("region") != link["to_region"]
+                        or (pos == 0 and
+                            (match is None or int(match.group(1)) != item["number"]))):
+                    raise ValueError("CONTINUATION_STEP_OCR_LINE_UNTRACEABLE")
+            reconstructed = _normalise_space(" ".join(
+                [STEP_RE.match(origins[0]["text"]).group(2)] +
+                [source_line["text"] for source_line in origins[1:]]
+            ))
+            if reconstructed != item["text"]:
+                raise ValueError("CONTINUATION_STEP_MULTILINE_TEXT_NOT_FROM_SOURCE")
         key = (start, end, link["to_region"], tuple(numbers))
         if key in seen:
             raise ValueError("DUPLICATE_PROCEDURE_CONTINUATION")
