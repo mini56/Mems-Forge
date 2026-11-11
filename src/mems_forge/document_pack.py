@@ -391,6 +391,64 @@ def _review_only_cross_page_links(
     return result
 
 
+def _review_only_source_notices(
+    fragment_root: Path | None, source_sha: str, page_count: int,
+) -> list[dict]:
+    """Import source WARNING/CAUTION/NOTE OCR without assigning a repair."""
+    if fragment_root is None:
+        return []
+    root = Path(fragment_root)
+    report = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+    if report.get("source_pdf_sha256") != source_sha:
+        raise ValueError("SAFETY_NOTICE_SOURCE_DOCUMENT_MISMATCH")
+    original_map = report.get("original_physical_page_map") or {}
+    if set(original_map) != {str(n) for n in range(1, page_count + 1)}:
+        raise ValueError("SAFETY_NOTICE_PAGE_MAP_INCOMPLETE")
+    result: list[dict] = []
+    for page_number in range(1, page_count + 1):
+        page_file = root / source_sha / "pages" / f"page-{page_number:04d}.json"
+        if not page_file.is_file():
+            raise ValueError("SAFETY_NOTICE_PAGE_EVIDENCE_MISSING")
+        page = json.loads(page_file.read_text(encoding="utf-8"))
+        notices = page.get("source_notices") or []
+        if (page.get("page_number") != page_number
+                or page.get("source_notice_count") != len(notices)):
+            raise ValueError("SAFETY_NOTICE_PAGE_EVIDENCE_INCONSISTENT")
+        for notice in notices:
+            lines = notice.get("source_lines")
+            if (notice.get("page_number") != page_number
+                    or notice.get("kind") not in ("WARNING", "CAUTION", "NOTE")
+                    or notice.get("region") not in ("left", "right", "body")
+                    or notice.get("relationship_to_procedure") != "UNRESOLVED"
+                    or notice.get("validation_state")
+                    != "OCR_SOURCE_NOTICE_UNVERIFIED"
+                    or notice.get("approved_for_ai") is not False
+                    or not isinstance(lines, list) or not lines
+                    or notice.get("source_line_count") != len(lines)
+                    or not re.match(r"^(?:WARNING|CAUTION|NOTE)\s*:",
+                                    str(lines[0].get("text", "")), re.IGNORECASE)
+                    or notice.get("source_text") != " ".join(
+                        str(item.get("text", "")) for item in lines
+                    )):
+                raise ValueError("SAFETY_NOTICE_INVALID_OR_INVENTED")
+            if not all(
+                isinstance(line.get("source_line_key"), list)
+                and len(line["source_line_key"]) == 3
+                and isinstance(line.get("bbox"), list)
+                and len(line["bbox"]) == 4
+                and line.get("region") == notice["region"]
+                for line in lines
+            ):
+                raise ValueError("SAFETY_NOTICE_UNTRACEABLE_SOURCE")
+            result.append({
+                **notice,
+                "original_physical_page": original_map[str(page_number)],
+            })
+    if len(result) != report.get("source_notice_count"):
+        raise ValueError("SAFETY_NOTICE_COUNT_MISMATCH")
+    return result
+
+
 def build_document_pack(
     pdf_path: Path, output_path: Path, *, reader_root: Path | None = None,
     ocr_root: Path | None = None,
@@ -426,7 +484,8 @@ def build_document_pack(
                  "ocr_issues": 0, "ocr_source_items": 0,
                  "ocr_numbered_segments": 0, "ocr_numbered_lines": 0,
                  "ocr_page_content": 0, "procedure_continuation_candidates": 0,
-                 "procedure_continuation_steps": 0}
+                 "procedure_continuation_steps": 0,
+                 "safety_notice_candidates": 0}
         ocr_members = {}
         with closing(sqlite3.connect(database_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
@@ -776,6 +835,38 @@ def build_document_pack(
                     )
                     count["procedure_continuation_steps"] += 1
             db.execute(
+                "CREATE TABLE pack_source_notices("
+                "notice_id TEXT PRIMARY KEY,"
+                "page_id TEXT NOT NULL REFERENCES source_pages(page_id),"
+                "original_physical_page INTEGER NOT NULL,"
+                "source_region TEXT NOT NULL,"
+                "notice_kind TEXT NOT NULL "
+                "CHECK(notice_kind IN ('WARNING','CAUTION','NOTE')),"
+                "source_text TEXT NOT NULL,"
+                "source_lines_json TEXT NOT NULL,"
+                "source_line_count INTEGER NOT NULL,"
+                "relationship_to_procedure TEXT NOT NULL "
+                "CHECK(relationship_to_procedure='UNRESOLVED'),"
+                "validation_state TEXT NOT NULL "
+                "CHECK(validation_state='unresolved'),"
+                "approved_for_ai INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(approved_for_ai=0))"
+            )
+            for i, notice in enumerate(_review_only_source_notices(
+                fragment_root, source_sha, expected_pages,
+            )):
+                db.execute(
+                    "INSERT INTO pack_source_notices "
+                    "VALUES(?,?,?,?,?,?,?,?,?,'unresolved',0)",
+                    (f"{revision}:notice:{i}",
+                     f"{revision}:p{notice['page_number']}",
+                     notice["original_physical_page"], notice["region"],
+                     notice["kind"], notice["source_text"],
+                     json.dumps(notice["source_lines"], ensure_ascii=False),
+                     notice["source_line_count"], "UNRESOLVED"),
+                )
+                count["safety_notice_candidates"] += 1
+            db.execute(
                 "CREATE TABLE pack_image_occurrences("
                 "revision_id TEXT NOT NULL,page_number INTEGER NOT NULL,"
                 "image_index INTEGER NOT NULL,sha256_or_digest TEXT,"
@@ -1054,6 +1145,19 @@ def inspect_document_pack(path: Path) -> dict:
                         "OR q.physical_page_number<>p.physical_page_number+1 "
                         "OR c.to_original_page<>c.from_original_page+1"
                     ).fetchone()[0] if has_continuation_index else 0)
+                    has_notice_index = db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='pack_source_notices'"
+                    ).fetchone() is not None
+                    notice_count = (db.execute(
+                        "SELECT COUNT(*) FROM pack_source_notices"
+                    ).fetchone()[0] if has_notice_index else 0)
+                    invalid_notices = (db.execute(
+                        "SELECT COUNT(*) FROM pack_source_notices "
+                        "WHERE validation_state<>'unresolved' OR approved_for_ai<>0 "
+                        "OR relationship_to_procedure<>'UNRESOLVED' OR "
+                        "source_line_count<1"
+                    ).fetchone()[0] if has_notice_index else 0)
                     has_step_index = db.execute(
                         "SELECT 1 FROM sqlite_master WHERE type='table' "
                         "AND name='pack_procedure_continuation_steps'"
@@ -1073,6 +1177,11 @@ def inspect_document_pack(path: Path) -> dict:
                         "SELECT value FROM database_metadata WHERE key='publication_state'"
                     ).fetchone()
                     source_line_index_by_page = {}
+                    indexed_notice_pages = (set(row[0] for row in db.execute(
+                        "SELECT DISTINCT q.physical_page_number "
+                        "FROM pack_source_notices n "
+                        "JOIN source_pages q ON n.page_id=q.page_id"
+                    )) if has_notice_index else set())
                     indexed_link_pages = (set(row[0] for row in db.execute(
                         "SELECT DISTINCT q.physical_page_number "
                         "FROM pack_procedure_continuation_candidates c "
@@ -1099,7 +1208,7 @@ def inspect_document_pack(path: Path) -> dict:
                         parsed, warnings = _parse_words(
                             original_tsv.decode("utf-8"), n
                         )
-                        if n in indexed_link_pages:
+                        if n in indexed_link_pages or n in indexed_notice_pages:
                             source_line_index_by_page[n] = _immutable_ocr_line_index(
                                 parsed
                             )
@@ -1121,6 +1230,54 @@ def inspect_document_pack(path: Path) -> dict:
                         if indexed_words != expected_words:
                             return {"valid": False, "error": "ocr_words_not_from_source_tsv",
                                     "page": n}
+                    if has_notice_index:
+                        for (page_n, kind, content, ref_json, count,
+                             relation, state, approved) in db.execute(
+                            "SELECT p.physical_page_number,n.notice_kind,"
+                            "n.source_text,n.source_lines_json,"
+                            "n.source_line_count,n.relationship_to_procedure,"
+                            "n.validation_state,n.approved_for_ai "
+                            "FROM pack_source_notices n JOIN source_pages p "
+                            "ON n.page_id=p.page_id"
+                        ):
+                            try:
+                                refs = json.loads(ref_json)
+                            except (TypeError, ValueError):
+                                return {
+                                    "valid": False,
+                                    "error": "source_notice_bad_lineage",
+                                }
+                            if (not isinstance(refs, list) or not refs
+                                    or len(refs) != count
+                                    or content != " ".join(
+                                        str(ref.get("text", "")) for ref in refs
+                                    ) or not re.match(
+                                        rf"^{kind}\s*:",
+                                        str(refs[0].get("text", "")),
+                                        re.IGNORECASE,
+                                    ) or relation != "UNRESOLVED"
+                                    or state != "unresolved" or approved != 0):
+                                return {
+                                    "valid": False,
+                                    "error": "source_notice_not_preserved",
+                                }
+                            canonical = source_line_index_by_page.get(page_n, {})
+                            for source_line in refs:
+                                key = source_line.get("source_line_key")
+                                if (not isinstance(key, list) or len(key) != 3
+                                        or any(type(x) is not int for x in key)):
+                                    return {
+                                        "valid": False,
+                                        "error": "source_notice_bad_lineage",
+                                    }
+                                official = canonical.get(tuple(key))
+                                if (official is None or
+                                        official["text"] != source_line.get("text") or
+                                        official["bbox"] != source_line.get("bbox")):
+                                    return {
+                                        "valid": False,
+                                        "error": "source_notice_not_from_original_tsv",
+                                    }
                     if has_step_index:
                         candidates = db.execute(
                             "SELECT c.candidate_id,q.physical_page_number,"
@@ -1209,6 +1366,8 @@ def inspect_document_pack(path: Path) -> dict:
                             invalid_continuations or
                             continuity_steps != manifest["counts"].get("procedure_continuation_steps", 0) or
                             invalid_steps or
+                            notice_count != manifest["counts"].get("safety_notice_candidates", 0) or
+                            invalid_notices or
                             incorrectly_approved or
                             metadata is None or metadata[0] != "blocked_semantic_review"):
                         return {"valid": False, "error": "sqlite_validation_failed"}
