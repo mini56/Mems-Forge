@@ -25,14 +25,17 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
           python -m pip install .
+          python -m pip install pytest
+          python -m pytest tests/test_cross_page_procedure_candidates.py tests/test_procedure_fragments.py tests/test_document_pack.py -q
       - name: Diagnostiquer uniquement des pages physiques voisines
         shell: bash
         run: |
           python -u - <<'PY'
-          import hashlib, json
+          import hashlib, json, sqlite3, zipfile
           from pathlib import Path
           import pymupdf
           from mems_forge.full_document_audit import run_full_document_audit
+          from mems_forge.document_pack import build_document_pack, inspect_document_pack
 
           src = sorted(Path('depot').rglob('*.pdf'))
           if len(src) != 1 or src[0].read_bytes()[:4] != b'%PDF':
@@ -66,6 +69,56 @@ jobs:
           summary['cross_page_link_candidates'] = fragment_summary[
               'cross_page_link_candidates'
           ]
+          candidates = summary['cross_page_link_candidates']
+          if len(candidates) != 1:
+              raise SystemExit(
+                  f'EXPECTED_EXACTLY_ONE_REAL_92_93_REPAIR_LINK_NOT_{len(candidates)}'
+              )
+          link = candidates[0]
+          if not (
+              link['from_original_physical_page'] == 92 and
+              link['to_original_physical_page'] == 93 and
+              link['candidate_repair_number'] == '12.65.12' and
+              link['to_region'] == 'left' and
+              link['candidate_phase'] == 'refit' and
+              link['chapter_id'] == 'UNRESOLVED' and
+              link['fragment_step_numbers'] == list(range(1,12)) and
+              link['status'] == 'REVIEW_REQUIRED' and
+              link['approved_for_ai'] is False and
+              'chapter_unresolved_review_required' in link['evidence'] and
+              'original_right_column_to_next_left_column' in link['evidence']
+          ):
+              raise SystemExit('REAL_92_93_LINK_EVIDENCE_NOT_VERIFIED')
+          pack = output / 'candidate-no-publication.zip'
+          built = build_document_pack(
+              excerpt, pack, ocr_root=output/'audit/ocr',
+              fragment_root=output/'audit/fragments',
+          )
+          verified = inspect_document_pack(pack)
+          if not verified['valid'] or verified['state'] != 'CANDIDATE_NOT_VALIDATED':
+              raise SystemExit('MULTIPAGE_CANDIDATE_PACK_NOT_VALIDATED')
+          with zipfile.ZipFile(pack) as bundle:
+              dbfile = output / 'inspect.sqlite'
+              dbfile.write_bytes(bundle.read('data/knowledge.sqlite'))
+              if bundle.read('source/document.pdf') != excerpt.read_bytes():
+                  raise SystemExit('SOURCE_PDF_NOT_RETAINED')
+          with sqlite3.connect(dbfile) as db:
+              repairs = db.execute(
+                  'SELECT from_original_page,to_original_page,'
+                  'candidate_repair_number,to_region,validation_state,approved_for_ai '
+                  'FROM pack_procedure_continuation_candidates'
+              ).fetchall()
+              if repairs != [(92, 93, '12.65.12', 'left', 'unresolved', 0)]:
+                  raise SystemExit(f'MULTIPAGE_REPAIR_MISSING_IN_SQLITE:{repairs}')
+              if db.execute('SELECT COUNT(*) FROM structured_entities').fetchone()[0]:
+                  raise SystemExit('TECHNICAL_KNOWLEDGE_PREMATURELY_PROMOTED')
+              if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                  raise SystemExit('MULTIPAGE_SQLITE_CORRUPTED')
+          dbfile.unlink()
+          summary['candidate_pack_integrity_validated'] = True
+          summary['multpage_92_93_sqlite_provenance_checked'] = True
+          summary['unvalidated_multpage_candidates'] = len(repairs)
+          summary['technical_knowledge_published'] = False
           for i, physical in enumerate(selected_pages,1):
               stem = f'page-{i:04d}.json'
               bases = output / 'audit'
@@ -121,6 +174,19 @@ jobs:
               'fragment_pages':[p['original_page'] for p in summary['per_page']
                                 if p['fragments']],
               'link_candidates':len(summary['cross_page_link_candidates']),
+              'candidate_links':[{
+                  'source_pages': [x['from_original_physical_page'],
+                                   x['to_original_physical_page']],
+                  'repair_number': x['candidate_repair_number'],
+                  'phase': x['candidate_phase'],
+                  'step_count': len(x['fragment_step_numbers']),
+                  'status': x['status'],
+                  'chapter_id': x['chapter_id'],
+              } for x in candidates],
+              'sqlite_candidate_pack_validated': summary[
+                  'candidate_pack_integrity_validated'
+              ],
+              'technical_knowledge_published': False,
               'per_page':[{
                   'page':p['original_page'],
                   'procedures':p['procedures'],
