@@ -14,12 +14,14 @@ from typing import Any
 import pymupdf
 
 from mems_forge.adaptive_coverage import write_adaptive_coverage
+from mems_forge.page_content import classify_page
 from mems_forge.ocr_layout import run_layout_prototype
 from mems_forge.ocr_reader import (
     OCR_VERSION,
     _confidence_summary,
     _parse_words,
     _run_tesseract_tsv,
+    TSV_COLUMNS,
     _words_to_text,
 )
 from mems_forge.ocr_strategy_audit import (
@@ -104,6 +106,7 @@ def _run_full_ocr(
         tmp_dir = pathlib.Path(tmp)
         for page_number in range(1, doc.page_count + 1):
             page = doc.load_page(page_number - 1)
+            visual = classify_page(page)
             pix = page.get_pixmap(matrix=matrix, colorspace=pymupdf.csGRAY, alpha=False)
             temp_image = tmp_dir / f"page-{page_number:04d}.png"
             pix.save(temp_image)
@@ -113,7 +116,13 @@ def _run_full_ocr(
             if page_number in preview_pages:
                 shutil.copyfile(temp_image, previews_dir / temp_image.name)
 
-            tsv, stderr = _run_tesseract_tsv(temp_image, language=language)
+            # Preserve the exact source page even for blank scans. An empty
+            # but valid TSV header maintains format-v1 traceability and permits
+            # safe SQLite verification without running Tesseract.
+            if visual["ocr_skipped"]:
+                tsv, stderr = "\t".join(TSV_COLUMNS) + "\n", ""
+            else:
+                tsv, stderr = _run_tesseract_tsv(temp_image, language=language)
             raw_tsv = tsv.encode("utf-8")
             raw_path = raw_dir / f"page-{page_number:04d}.tsv.gz"
             with gzip.open(raw_path, "wb") as stream:
@@ -130,14 +139,18 @@ def _run_full_ocr(
             adaptive = None
             adaptive_failure = None
             try:
-                recovered = _recover_list_with_two_resolutions(
-                    page, words, pix.width, pix.height,
-                    language, tmp_dir, dpi,
-                )
-                columns = _recheck_two_column_regions(
-                    page, words, pix.width, pix.height,
-                    language, tmp_dir, dpi,
-                )
+                if visual["ocr_skipped"]:
+                    recovered = None
+                    columns = None
+                else:
+                    recovered = _recover_list_with_two_resolutions(
+                        page, words, pix.width, pix.height,
+                        language, tmp_dir, dpi,
+                    )
+                    columns = _recheck_two_column_regions(
+                        page, words, pix.width, pix.height,
+                        language, tmp_dir, dpi,
+                    )
                 if recovered or columns:
                     adaptive = {
                         "parser_version": 1,
@@ -151,6 +164,12 @@ def _run_full_ocr(
                 adaptive_failure = f"{type(exc).__name__}: {exc}"
 
             review_reasons: list[str] = []
+            empty_adaptive_regions = sorted(
+                region for region, entry in (adaptive or {}).get("columns", {}).items()
+                if not str(entry.get("text") or "").strip()
+            )
+            if empty_adaptive_regions:
+                review_reasons.append("adaptive_region_without_text")
             if adaptive_failure is not None:
                 review_reasons.append("automatic_region_recovery_failed")
             if (adaptive and adaptive["recovered_list"] and
@@ -158,8 +177,11 @@ def _run_full_ocr(
                 review_reasons.append("collapsed_list_ocr_modes_conflict")
             if parse_warnings:
                 review_reasons.append("ocr_parse_warning")
-            if not words:
-                review_reasons.append("no_ocr_words")
+            if not words and not visual["ocr_skipped"]:
+                review_reasons.append(
+                    "sparse_visual_content_no_ocr" if visual["kind"] == "SPARSE_OR_NOISE"
+                    else "no_ocr_words"
+                )
             if confidence["mean"] is not None and confidence["mean"] < 85:
                 review_reasons.append("mean_ocr_confidence_below_85")
             if confidence["below_50"] > 0:
@@ -198,6 +220,8 @@ def _run_full_ocr(
                     "retained_as_preview": page_number in preview_pages,
                 },
                 "adaptive_evaluation_version": 1,
+                "page_content": visual,
+                "adaptive_empty_regions": empty_adaptive_regions,
                 "adaptive_extraction": adaptive,
                 "adaptive_failure": adaptive_failure,
                 "raw_ocr": {
@@ -220,6 +244,8 @@ def _run_full_ocr(
             page_summaries.append(
                 {
                     "page_number": page_number,
+                    "page_content_kind": visual["kind"],
+                    "ocr_skipped_blank": visual["ocr_skipped"],
                     "word_count": len(words),
                     "character_count": len(text),
                     "confidence": confidence,
@@ -266,7 +292,12 @@ def _run_full_ocr(
         "processed_page_count": len(page_summaries),
         "retained_preview_pages": sorted(preview_pages),
         "parse_warning_pages": [p["page_number"] for p in page_summaries if p["parse_warning_count"]],
-        "no_word_pages": [p["page_number"] for p in page_summaries if p["word_count"] == 0],
+        "blank_scan_pages": [p["page_number"] for p in page_summaries
+                             if p["ocr_skipped_blank"]],
+        "sparse_scan_pages": [p["page_number"] for p in page_summaries
+                              if p["page_content_kind"] == "SPARSE_OR_NOISE"],
+        "no_word_pages": [p["page_number"] for p in page_summaries
+                          if p["word_count"] == 0 and not p["ocr_skipped_blank"]],
         "suspicious_long_token_pages": [
             p["page_number"] for p in page_summaries if p["max_word_length"] > 120
         ],
@@ -356,6 +387,8 @@ def run_full_document_audit(
         "layer_count_match": layer_count_match,
         "ocr": {
             "parse_warning_pages": ocr_summary["parse_warning_pages"],
+            "blank_scan_pages": ocr_summary["blank_scan_pages"],
+            "sparse_scan_pages": ocr_summary["sparse_scan_pages"],
             "no_word_pages": ocr_summary["no_word_pages"],
             "suspicious_long_token_pages": ocr_summary["suspicious_long_token_pages"],
             "review_required_page_count": len(ocr_summary["review_required_pages"]),
