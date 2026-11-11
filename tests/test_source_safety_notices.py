@@ -209,3 +209,29 @@ def test_forged_warning_rejected_even_after_sha_recalculated(tmp_path: Path):
     result = inspect_document_pack(corrupt)
     assert result["valid"] is False
     assert result["error"] == "source_notice_not_preserved"
+
+
+def test_note_continuation_preserves_original_two_line_text():
+    layout = {
+        "page_number": 1,
+        "lines": [
+            _source_line(
+                1, "Note: Support driving flange to avoid straining the",
+                20, 20, 530, 40,
+            ),
+            _source_line(2, "brake hose.", 20, 44, 230, 60),
+            _source_line(3, "1. Remove bracket.", 20, 70, 280, 94),
+        ],
+    }
+    data = analyze_page_fragments(
+        layout, {"page_number": 1, "procedures": []},
+    )
+    assert data["source_notice_count"] == 1
+    item = data["source_notices"][0]
+    assert item["source_text"] == (
+        "Note: Support driving flange to avoid straining the brake hose."
+    )
+    assert item["source_line_count"] == 2
+    assert item["source_lines"][1]["text"] == "brake hose."
+    assert item["relationship_to_procedure"] == "UNRESOLVED"
+    assert item["approved_for_ai"] is False
