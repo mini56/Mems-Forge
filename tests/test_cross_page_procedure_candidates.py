@@ -301,3 +301,63 @@ def test_unknown_chapter_fallback_refuses_ambiguous_or_disjoint_pages(override):
 def test_no_old_procedure_number_remains_unresolved():
     original = _real_92_to_93_pattern()
     assert original[0]["candidate_repair_number"] != "12.65.05"
+
+
+def test_three_page_candidate_indexes_complete_step_text_in_sqlite(tmp_path: Path):
+    source, sha = _pdf3(tmp_path)
+    fragment_root = _write_candidate_procedure_report(tmp_path, sha)
+    pack = tmp_path / "multiline-unapproved.zip"
+    result = build_document_pack(source, pack, fragment_root=fragment_root)
+    assert result["manifest"]["counts"]["procedure_continuation_steps"] == 4
+    assert inspect_document_pack(pack)["valid"] is True
+    with zipfile.ZipFile(pack) as archive:
+        db_path = tmp_path / "candidate.sqlite"
+        db_path.write_bytes(archive.read("data/knowledge.sqlite"))
+    with sqlite3.connect(db_path) as db:
+        steps = db.execute(
+            "SELECT step_number,candidate_text,source_line_count,"
+            "measurement_mentions_json,validation_state,approved_for_ai "
+            "FROM pack_procedure_continuation_steps "
+            "ORDER BY candidate_id,step_number"
+        ).fetchall()
+        assert steps == [
+            (number, f"Verified transcription candidate {number}", 1,
+             "[]", "unresolved", 0)
+            for number in (4, 5, 6, 7)
+        ]
+
+
+def test_rehashed_forged_continuation_step_text_is_rejected(tmp_path: Path):
+    source, sha = _pdf3(tmp_path)
+    fragment_root = _write_candidate_procedure_report(tmp_path, sha)
+    candidate = tmp_path / "clean.zip"
+    build_document_pack(source, candidate, fragment_root=fragment_root)
+    with zipfile.ZipFile(candidate) as archive:
+        original_members = {
+            name: archive.read(name) for name in archive.namelist()
+        }
+    changed_db = tmp_path / "changed.sqlite"
+    changed_db.write_bytes(original_members["data/knowledge.sqlite"])
+    with sqlite3.connect(changed_db) as db:
+        db.execute(
+            "UPDATE pack_procedure_continuation_steps "
+            "SET candidate_text='Unsafe fabricated torque 999 Nm' "
+            "WHERE step_number=4"
+        )
+        db.commit()
+    original_members["data/knowledge.sqlite"] = changed_db.read_bytes()
+    manifest = json.loads(original_members["manifest.json"])
+    manifest["members_sha256"]["data/knowledge.sqlite"] = hashlib.sha256(
+        original_members["data/knowledge.sqlite"]
+    ).hexdigest()
+    original_members["manifest.json"] = json.dumps(manifest).encode("utf-8")
+    altered_pack = tmp_path / "rehashed.zip"
+    with zipfile.ZipFile(altered_pack, "w") as archive:
+        for name, content in original_members.items():
+            archive.writestr(name, content)
+    verdict = inspect_document_pack(altered_pack)
+    assert verdict["valid"] is False
+    assert verdict["error"] in (
+        "multiline_step_provenance_inconsistent",
+        "multiline_step_text_not_from_source",
+    )
