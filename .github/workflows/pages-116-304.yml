@@ -13,7 +13,7 @@ permissions:
 jobs:
   inspect-two-original-pages:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Recuperer le PDF original en lecture seule
         uses: actions/checkout@v4
@@ -28,15 +28,20 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
           python -m pip install . pytest
+          python -m pytest tests/test_source_coordinate_tolerance.py tests/test_ocr_strategy_audit.py tests/test_document_pack.py -q
       - name: Analyser 12 pages choisies depuis les anomalies reelles du corpus
         shell: bash
         run: |
           python -u - <<'PY'
-          import hashlib, json
+          import hashlib, json, sqlite3, zipfile
           from pathlib import Path
           import pymupdf
           from mems_forge.full_document_audit import run_full_document_audit
-          from mems_forge.document_pack import _anchored_source_items
+          from mems_forge.document_pack import (
+              _anchored_source_items, _bbox_within_original_ocr_region,
+              build_document_pack, inspect_document_pack,
+          )
+          from mems_forge.source_validation import audit_source_pack
 
           sources = sorted(p for p in Path('depot').rglob('*')
                            if p.is_file() and p.suffix.lower() == '.pdf')
@@ -71,9 +76,12 @@ jobs:
                       errors.append('SEQUENCE_RESTART_OR_NONCONTIGUOUS_NUMBER')
                   if len(bbox) != 4 or len(roi) != 4:
                       errors.append('INVALID_GEOMETRY_SHAPE')
-                  elif not (roi[0] <= bbox[0] < bbox[2] <= roi[2] and
-                            roi[1] <= bbox[1] < bbox[3] <= roi[3]):
-                      errors.append('SOURCE_BBOX_OUTSIDE_ROI')
+                  elif not _bbox_within_original_ocr_region(
+                      bbox, roi,
+                      page['pdf_page']['width_points'],
+                      page['pdf_page']['height_points'],
+                  ):
+                      errors.append('SOURCE_BBOX_OUTSIDE_400DPI_PIXEL_TOLERANCE')
                   if errors:
                       problems.append({
                           'item_index': ordinal,
@@ -100,18 +108,90 @@ jobs:
                   'anchored_item_count': len(region_entries),
                   'accepted_source_items': len(saved),
                   'columns': sorted(((page.get('adaptive_extraction') or {}).get('columns') or {})),
+                  'phase_groups': {
+                      side: [
+                          {
+                              'phase': group['phase'],
+                              'source_phase_heading': group['source_phase_heading'],
+                              'step_numbers': group['step_numbers'],
+                              'sequence_status': group['sequence_status'],
+                          }
+                          for group in section.get('phase_segments', [])
+                      ]
+                      for side, section in
+                      ((page.get('adaptive_extraction') or {}).get('columns') or {}).items()
+                  },
+                  'page_visual_kind': (page.get('page_content') or {}).get('kind'),
+                  'ocr_skipped': (page.get('page_content') or {}).get('ocr_skipped'),
                   'review_reasons': page.get('review_reasons'),
                   'source_issues': problems,
                   'validator': verdict,
               })
-          summary = {'original_pages_examined':source_pages,
-                     'original_pages_processed':len(source_pages),
-                     'source_extraction':items,
-                     'publication_authorized':False}
+          by_page = {entry['original_physical_page']: entry for entry in items}
+          if by_page[116]['accepted_source_items'] != 19:
+              raise SystemExit('ORIGINAL_PAGE_116_19_COMPONENTS_NOT_ACCEPTED')
+          if by_page[304]['accepted_source_items'] != 7:
+              raise SystemExit('ORIGINAL_PAGE_304_7_ANCHORS_NOT_ACCEPTED')
+          if by_page[304]['source_issues']:
+              raise SystemExit('ORIGINAL_PAGE_304_GEOMETRY_QUANTIZATION_NOT_RESOLVED')
+          if not (by_page[15]['page_visual_kind'] == 'BLANK_SCAN'
+                  and by_page[15]['ocr_skipped']
+                  and by_page[15]['baseline_ocr_words'] == 0):
+              raise SystemExit('ORIGINAL_PAGE_15_BLANK_UNRECOGNIZED')
+          if not (by_page[461]['page_visual_kind'] == 'RASTER_CONTENT'
+                  and not by_page[461]['ocr_skipped']
+                  and by_page[461]['baseline_ocr_words'] == 0):
+              raise SystemExit('ORIGINAL_PAGE_461_DIAGRAM_MISCLASSIFIED_AS_BLANK')
+
+          # The selected PDF is an isolated test corpus: its page indices
+          # 1..12 are NOT original physical page numbers 7..461.
+          sample_pack = root / 'sample-candidate.zip'
+          built = build_document_pack(
+              extracted, sample_pack, ocr_root=root / 'audit/ocr'
+          )
+          checked = inspect_document_pack(sample_pack)
+          source_audit = audit_source_pack(sample_pack)
+          if (not checked['valid'] or checked['state'] != 'CANDIDATE_NOT_VALIDATED'
+                  or not source_audit['native_source_parity_ok']):
+              raise SystemExit('SAMPLE_CANDIDATE_SQLITE_OR_SOURCE_PARITY_FAILED')
+          dbfile = root / 'inspect-candidate.sqlite'
+          with zipfile.ZipFile(sample_pack) as archive:
+              dbfile.write_bytes(archive.read('data/knowledge.sqlite'))
+              if archive.read('source/document.pdf') != extracted.read_bytes():
+                  raise SystemExit('SAMPLE_PDF_NOT_PRESERVED')
+          with sqlite3.connect(dbfile) as db:
+              item_counts = {
+                  original_page: db.execute(
+                      'SELECT COUNT(*) FROM pack_ocr_source_items '
+                      'WHERE page_id LIKE ?', (f'%:p{index}',),
+                  ).fetchone()[0]
+                  for index, original_page in enumerate(source_pages, start=1)
+              }
+              if item_counts[116] != 19 or item_counts[304] != 7:
+                  raise SystemExit('ANCHORS_NOT_RETAINED_IN_CANDIDATE_SQLITE')
+              if db.execute('SELECT COUNT(*) FROM structured_entities').fetchone()[0]:
+                  raise SystemExit('UNVALIDATED_FACTS_PROMOTED_TO_DATABASE')
+              if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                  raise SystemExit('SAMPLE_SQLITE_NOT_INTEGRAL')
+          dbfile.unlink()
+          summary = {
+              'original_pages_examined': source_pages,
+              'original_pages_processed': len(source_pages),
+              'source_extraction': items,
+              'original_pdf_sha256': hashlib.sha256(original.read_bytes()).hexdigest(),
+              'sample_pdf_sha256': sha,
+              'sample_index_to_original_physical_page': {
+                  str(index): number for index,number in enumerate(source_pages,1)
+              },
+              'source_anchored_items_by_page': item_counts,
+              'sample_candidate_pack_verified': True,
+              'original_pdf_retained_in_candidate': True,
+              'publication_authorized': False,
+          }
           (root / 'diagnostic.json').write_text(
               json.dumps(summary, indent=2, ensure_ascii=False),
               encoding='utf-8')
-          print('MEMS_FORGE_TWO_PAGE_DIAGNOSTIC=' +
+          print('MEMS_FORGE_12_PAGE_REGRESSION=' +
                 json.dumps(summary, ensure_ascii=False),flush=True)
           PY
       - name: Publier seulement le diagnostic, pas les pages PDF
