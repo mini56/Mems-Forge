@@ -38,6 +38,8 @@ jobs:
           python -u - <<'PY'
           import hashlib
           import json
+          import sqlite3
+          import zipfile
           from pathlib import Path
           from mems_forge.adaptive_coverage import audit_adaptive_coverage
           from mems_forge.depot_pipeline import process_one_document
@@ -67,11 +69,28 @@ jobs:
           pack = inspect_document_pack(Path(result["pack"]))
           if not pack["valid"] or pack["state"] != "CANDIDATE_NOT_VALIDATED":
               raise SystemExit("PACK_INVALID_OR_PREMATURELY_PUBLISHED")
+          with zipfile.ZipFile(result["pack"]) as bundle:
+              dbfile = Path("out/inspect-full-ocr.sqlite")
+              dbfile.write_bytes(bundle.read("data/knowledge.sqlite"))
+          with sqlite3.connect(dbfile) as db:
+              source_items = db.execute(
+                  "SELECT source_number,source_text,source_bbox_pdf_json,"
+                  "validation_state,approved_for_ai FROM pack_ocr_source_items "
+                  "WHERE page_id LIKE '%:p116' ORDER BY source_number"
+              ).fetchall()
+              if (len(source_items) != 19 or
+                      [x[0] for x in source_items] != list(range(1,20)) or
+                      any(x[3] != "unresolved" or x[4] != 0 for x in source_items)):
+                  raise SystemExit("REAL_482_PAGE_PACK_MISSING_19_ORIGINAL_COMPONENTS")
+          dbfile.unlink()
           report_file = Path("out/adaptive-482-summary.json")
           summary = {
               "source_pages": report["source_pages"],
               "pages_evaluated": report["pages_evaluated"],
               "status_counts": report["status_counts"],
+              "page116_anchored_sqlite_items": len(source_items),
+              "full_pack_ocr_source_items": result.get("ocr_source_items"),
+              "source_candidates_approved_for_ai": False,
               "issue_counts": report["issue_counts"],
               "unresolved_pages": report["unresolved_pages"],
               "source_parity_verified": result["source_parity_verified"],
