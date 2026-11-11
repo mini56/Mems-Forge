@@ -96,7 +96,8 @@ def _normalise(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
-def check_vision_candidates(data: dict, ocr_evidence: list[str]) -> dict:
+def check_vision_candidates(data: dict, ocr_evidence: list[str], *,
+                            max_items: int | None = None) -> dict:
     """Reject malformed model output and label all technical claims unapproved."""
     if not isinstance(data, dict) or set(data) != {
         "page_type", "items", "uncertainties"
@@ -108,6 +109,8 @@ def check_vision_candidates(data: dict, ocr_evidence: list[str]) -> dict:
             or not isinstance(uncertainties, list)
             or any(not isinstance(x, str) for x in uncertainties)):
         raise ValueError("AI_PAGE_ITEMS_INVALID")
+    if max_items is not None and len(items) > max_items:
+        raise ValueError("AI_PILOT_ITEM_LIMIT_EXCEEDED")
     checked = []
     corpus = [_normalise(x) for x in ocr_evidence if isinstance(x, str) and x.strip()]
     for index, item in enumerate(items):
@@ -152,12 +155,24 @@ def check_vision_candidates(data: dict, ocr_evidence: list[str]) -> dict:
 
 
 def _call_local_model(endpoint: str, model: str, image_bytes: bytes,
-                      ocr_evidence: list[str], timeout: int) -> dict:
+                      ocr_evidence: list[str], timeout: int,
+                      max_items: int | None = None) -> dict:
+    schema = json.loads(json.dumps(SCHEMA))
+    instructions = _SYSTEM_PROMPT
+    if max_items is not None:
+        schema["properties"]["items"]["maxItems"] = max_items
+        instructions += (
+            f" PILOT SAMPLE ONLY: include no more than {max_items} distinct "
+            "legible source-backed examples. Do not claim that the complete "
+            "page has been extracted. List omitted regions as uncertainties."
+        )
     request_body = {
         "model": model, "stream": False,
-        "format": SCHEMA, "options": {"temperature": 0},
+        "format": schema,
+        "options": {"temperature": 0, "num_ctx": 4096,
+                    "num_predict": 1200 if max_items else 4096},
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": instructions},
             {
                 "role": "user",
                 "content": (
@@ -178,7 +193,9 @@ def _call_local_model(endpoint: str, model: str, image_bytes: bytes,
     try:
         with urlopen(request, timeout=timeout) as response:
             answer = json.loads(response.read(2_000_000))
-    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+    except TimeoutError as exc:
+        raise RuntimeError("LOCAL_VISION_MODEL_TIMEOUT") from exc
+    except (HTTPError, URLError, OSError, ValueError) as exc:
         raise RuntimeError("LOCAL_VISION_MODEL_UNAVAILABLE") from exc
     try:
         message = answer["message"]["content"]
@@ -193,7 +210,8 @@ def _call_local_model(endpoint: str, model: str, image_bytes: bytes,
 def examine_pdf_page(
     pdf_path: Path, page_number: int, *,
     model: str, endpoint: str = "http://127.0.0.1:11434",
-    ocr_evidence: list[str] | None = None, timeout: int = 120,
+    ocr_evidence: list[str] | None = None, timeout: int = 600,
+    max_items: int | None = None,
 ) -> dict:
     """Examine a PDF source page using a configured *running* local VLM.
 
@@ -201,6 +219,9 @@ def examine_pdf_page(
     Blank pages are classified from pixels before any model inference.
     """
     endpoint = _local_endpoint(endpoint)
+    if max_items is not None and (type(max_items) is not int or
+                                  not 1 <= max_items <= 200):
+        raise ValueError("INVALID_PILOT_ITEM_LIMIT")
     if not model or len(model) > 128 or not re.fullmatch(r"[\w./:-]+", model):
         raise ValueError("LOCAL_VISION_MODEL_NAME_REQUIRED")
     pdf_path = Path(pdf_path)
@@ -220,12 +241,20 @@ def examine_pdf_page(
             model_invoked = False
         else:
             bitmap = page.get_pixmap(
-                matrix=pymupdf.Matrix(2.5, 2.5),
+                # Small CPU-only GitHub runners benefit from lower spatial
+                # resolution during bounded PILOT tests. Full-page technical
+                # verification will need higher-resolution regional crops.
+                matrix=pymupdf.Matrix(1.8 if max_items else 2.5,
+                                     1.8 if max_items else 2.5),
                 colorspace=pymupdf.csRGB, alpha=False,
             )
             image_bytes = bitmap.tobytes("png")
-            raw = _call_local_model(endpoint, model, image_bytes, ocr, timeout)
-            interpreted = check_vision_candidates(raw, ocr)
+            raw = _call_local_model(
+                endpoint, model, image_bytes, ocr, timeout, max_items
+            )
+            interpreted = check_vision_candidates(
+                raw, ocr, max_items=max_items
+            )
             if interpreted["page_type"] == "blank" and (
                     classification["kind"] not in {"BLANK_SCAN", "SPARSE_OR_NOISE"}):
                 raise ValueError("AI_BLANK_CONTRADICTS_ORIGINAL_IMAGE")
@@ -238,16 +267,23 @@ def examine_pdf_page(
         "page_content": classification,
         "model_requested": model,
         "local_model_invoked": model_invoked,
+        "extraction_scope": (
+            "BOUNDED_PILOT_SAMPLE_NOT_EXHAUSTIVE" if max_items is not None
+            else "WHOLE_PAGE_CANDIDATE_NOT_CERTIFIED"
+        ),
+        "pilot_item_limit": max_items,
         **interpreted,
     }
 
 
 def write_page_report(pdf_path: Path, page_number: int, output: Path,
                       *, model: str, endpoint: str = "http://127.0.0.1:11434",
-                      ocr_evidence: list[str] | None = None) -> dict:
+                      ocr_evidence: list[str] | None = None,
+                      timeout: int = 600,
+                      max_items: int | None = None) -> dict:
     result = examine_pdf_page(
         pdf_path, page_number, model=model, endpoint=endpoint,
-        ocr_evidence=ocr_evidence,
+        ocr_evidence=ocr_evidence, timeout=timeout, max_items=max_items,
     )
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
