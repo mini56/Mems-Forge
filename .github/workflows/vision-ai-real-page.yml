@@ -1,0 +1,125 @@
+name: MEMS Forge — premiere lecture IA reelle du manuel
+
+on:
+  push:
+    branches: [feature/source-evidence-validation-20261110]
+    paths:
+      - '.github/workflows/vision-ai-real-page.yml'
+      - 'src/mems_forge/local_vision_ai.py'
+      - 'tests/test_local_vision_ai.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyse-ia-documentaire:
+    name: Lire la page 116 avec une IA multimodale sur GitHub
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      OLLAMA_HOST: 127.0.0.1:11434
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: "0"
+      MEMS_VISION_MODEL: qwen3-vl:2b-instruct-q4_K_M
+
+    steps:
+      - name: Recuperer le vrai manuel PDF via Git LFS
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Installer Python et MEMS Forge
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install .
+
+      - name: Controler le vrai PDF d'origine
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pymupdf
+          sources = list(Path("depot").rglob("*.pdf"))
+          if len(sources) != 1 or sources[0].read_bytes()[:4] != b"%PDF":
+              raise SystemExit("SOURCE_PDF_OR_LFS_MISSING")
+          with pymupdf.open(sources[0]) as pdf:
+              if pdf.page_count != 482:
+                  raise SystemExit("EXPECTED_482_PAGE_ORIGINAL")
+          print("Source originale verifiee : 482 pages")
+          PY
+
+      - name: Installer le moteur local Ollama (sans API payante)
+        shell: bash
+        run: |
+          curl -fsSL https://ollama.com/install.sh -o /tmp/install-ollama.sh
+          sh /tmp/install-ollama.sh
+          ollama --version
+          ollama serve > /tmp/mems-ollama.log 2>&1 &
+          for attempt in {1..45}; do
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error http://127.0.0.1:11434/api/tags > /dev/null
+
+      - name: Charger le modele de vision leger 2B (1,9 Go)
+        shell: bash
+        run: |
+          ollama pull "$MEMS_VISION_MODEL"
+          ollama list
+
+      - name: Faire lire une page originale par une vraie IA de vision
+        shell: bash
+        run: |
+          mkdir -p out/vision-candidate
+          python -u - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from mems_forge.local_vision_ai import write_page_report
+
+          source = next(Path("depot").rglob("*.pdf"))
+          model = os.environ["MEMS_VISION_MODEL"]
+          report = write_page_report(
+              source, 116, Path("out/vision-candidate/page-0116.json"),
+              model=model,
+          )
+          if not report["local_model_invoked"]:
+              raise SystemExit("VISION_MODEL_NOT_INVOKED")
+          if report["approved_for_publication"] or report["approved_for_automatic_ai_answers"]:
+              raise SystemExit("UNVERIFIED_VISION_FACTS_APPROVED")
+          verdict = {
+              "page": 116,
+              "model": model,
+              "real_model_invoked": report["local_model_invoked"],
+              "page_class": report["page_type"],
+              "proposed_items": len(report["items"]),
+              "uncertainties": len(report["uncertainties"]),
+              "unverified_items": sum(
+                  1 for item in report["items"] if not item["approved_for_ai"]
+              ),
+              "publication_authorized": False,
+              "candidate_report": "out/vision-candidate/page-0116.json",
+          }
+          Path("out/vision-candidate/verdict.json").write_text(
+              json.dumps(verdict, indent=2, ensure_ascii=False),
+              encoding="utf-8",
+          )
+          print("MEMS_FORGE_REAL_VISION_VERDICT=" +
+                json.dumps(verdict, ensure_ascii=False), flush=True)
+          if not report["items"]:
+              raise SystemExit("MODEL_DID_NOT_EXTRACT_ANY_ITEMS_FROM_SOURCE")
+          PY
+
+      - name: Archiver seulement les propositions IA, sans duplicata PDF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-vision-page-116-${{ github.run_id }}
+          path: out/vision-candidate/
+          if-no-files-found: warn
+          retention-days: 7
