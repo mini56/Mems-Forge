@@ -100,6 +100,26 @@ def _adaptive_ocr_evidence(page_data: dict, page_number: int) -> tuple[list, lis
 
 _NUMBERED_SOURCE = re.compile(r"^\s*(\d{1,3})\s*[.)]\s+\w")
 
+# PDF positions from the 400-dpi OCR image are rounded to full image pixels.
+# Exact PDF crop edges need not map to full pixels. Preserve the *measured*
+# coordinates; allow up to one pixel of quantization, never a broad tolerance.
+_SOURCE_PIXEL_TOLERANCE_POINTS = 72.0 / 400.0
+
+
+def _bbox_within_original_ocr_region(
+    bbox: list, roi: list, width: float, height: float,
+) -> bool:
+    if (len(bbox) != 4 or len(roi) != 4
+            or any(type(v) not in (int, float) for v in (*bbox, *roi))):
+        return False
+    t = _SOURCE_PIXEL_TOLERANCE_POINTS
+    return (
+        0 <= bbox[0] < bbox[2] <= width + t
+        and 0 <= bbox[1] < bbox[3] <= height + t
+        and roi[0] - t <= bbox[0] < bbox[2] <= roi[2] + t
+        and roi[1] - t <= bbox[1] < bbox[3] <= roi[3] + t
+    )
+
 
 def _anchored_source_items(page_data: dict, page_number: int) -> list[dict]:
     """Read only crosschecked, original-PDF OCR coordinates, never AI boxes.
@@ -139,10 +159,10 @@ def _anchored_source_items(page_data: dict, page_number: int) -> list[dict]:
                 or item.get("approved_for_ai") is not False
                 or item.get("validation_state") != "OCR_LOCATION_CANDIDATE"
                 or item.get("source") != "original_pdf_tesseract_400dpi_tsv"
-                or not isinstance(bbox, list) or len(bbox) != 4
-                or any(type(v) not in (int, float) for v in bbox)
-                or not (0 <= roi[0] <= bbox[0] < bbox[2] <= roi[2] <= width + 1)
-                or not (0 <= roi[1] <= bbox[1] < bbox[3] <= roi[3] <= height + 1)):
+                or not isinstance(bbox, list)
+                or not _bbox_within_original_ocr_region(
+                    bbox, roi, float(width), float(height)
+                )):
             raise ValueError(f"Invalid OCR original source item {index} on page {page_number}")
     return items
 
