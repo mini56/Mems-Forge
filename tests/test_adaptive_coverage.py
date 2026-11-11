@@ -92,3 +92,63 @@ def test_conflicting_column_and_list_is_not_silently_approved(tmp_path: Path):
         "COLUMN_LEFT_STEP_NUMBER_CONFLICT",
     }
     assert not result["approved_for_automatic_ai_answers"]
+
+
+def test_valid_explicit_remove_refit_restart_is_not_an_ocr_numbering_error(
+    tmp_path: Path,
+):
+    from mems_forge.ocr_strategy_audit import _phase_bounded_numbered_steps
+    sha = "e" * 64
+    phases = _phase_bounded_numbered_steps(
+        "Remove\n1. Undo bolt\n2. Remove cap\n"
+        "Refit\n1. Install cap\n2. Tighten bolt\n"
+    )
+    _page(tmp_path, sha, 1, columns={
+        "left": {
+            "numbering": {"gaps": [], "repeats": [1, 2]},
+            "phase_segments": phases,
+        },
+    })
+    result = audit_adaptive_coverage(tmp_path, sha, 1)
+    assert result["status_counts"] == {"RECHECKED_OCR_CANDIDATE": 1}
+    assert result["pages"][0]["issues"] == []
+    assert not result["approved_for_automatic_ai_answers"]
+
+
+def test_missing_phase_on_restart_is_review_not_fabricated_ocr_error(
+    tmp_path: Path,
+):
+    from mems_forge.ocr_strategy_audit import _phase_bounded_numbered_steps
+    sha = "f" * 64
+    phases = _phase_bounded_numbered_steps(
+        "Remove\n1. Undo bolt\n2. Remove cap\n"
+        "1. Install cap\n2. Tighten bolt\n"
+    )
+    _page(tmp_path, sha, 1, columns={
+        "left": {
+            "numbering": {"gaps": [], "repeats": [1, 2]},
+            "phase_segments": phases,
+        },
+    })
+    result = audit_adaptive_coverage(tmp_path, sha, 1)
+    assert result["pages"][0]["issues"] == [
+        "COLUMN_LEFT_NUMBERED_SOURCE_REVIEW"
+    ]
+    assert result["unresolved_pages"] == [1]
+
+
+def test_real_missing_step_still_fails_after_phase_separation(tmp_path: Path):
+    from mems_forge.ocr_strategy_audit import _phase_bounded_numbered_steps
+    sha = "0" * 64
+    phases = _phase_bounded_numbered_steps(
+        "Refit\n1. Install cap\n2. Tighten bolt\n4. Test unit\n"
+    )
+    _page(tmp_path, sha, 1, columns={
+        "right": {
+            "numbering": {"gaps": [3], "repeats": []},
+            "phase_segments": phases,
+        },
+    })
+    result = audit_adaptive_coverage(tmp_path, sha, 1)
+    assert "COLUMN_RIGHT_STEP_NUMBER_CONFLICT" in result["pages"][0]["issues"]
+    assert "COLUMN_RIGHT_NUMBERED_SOURCE_REVIEW" in result["pages"][0]["issues"]
