@@ -91,6 +91,44 @@ def _is_plausible_step_continuation(
 _SOURCE_NOTICE_RE = re.compile(r"^\s*(WARNING|CAUTION|NOTE)\s*:\s*(.*)$", re.IGNORECASE)
 
 
+def _is_plausible_notice_continuation(
+    initial: dict[str, Any],
+    previous: dict[str, Any],
+    candidate: dict[str, Any],
+) -> bool:
+    """Continue an unfinished safety/note sentence without swallowing a step.
+
+    Unlike numbered instructions, the wrapped text of a NOTE commonly starts
+    at exactly the same left edge. Geometry and the missing punctuation are
+    both required; uncertain text always remains unassigned source evidence.
+    """
+    old_text = _normalise_space(str(previous.get("text", "")))
+    new_text = _normalise_space(str(candidate.get("text", "")))
+    if (not old_text or not new_text
+            or old_text.rstrip().endswith((".", "!", "?", ";"))
+            or STEP_RE.match(new_text)
+            or _SOURCE_NOTICE_RE.match(new_text)
+            or _phase_from_line(new_text) is not None
+            or REPAIR_NO_RE.search(new_text)
+            or re.fullmatch(r"\d+[A-Z]\d{3,6}", new_text)):
+        return False
+    letters = [c for c in new_text if c.isalpha()]
+    if (len(letters) >= 5 and
+            sum(c.isupper() for c in letters) / len(letters) > 0.9):
+        return False
+    first, prior, next_ = (
+        item.get("bbox") for item in (initial, previous, candidate)
+    )
+    if any(not isinstance(box, list) or len(box) != 4
+           for box in (first, prior, next_)):
+        return False
+    return (
+        first[0] - 8 <= next_[0] <= first[2]
+        and next_[1] >= prior[1]
+        and -3 <= next_[1] - prior[3] <= 30
+    )
+
+
 def _source_notices(layout: dict[str, Any]) -> list[dict[str, Any]]:
     """Read actual safety/note headings in every body region, even completed repairs.
 
@@ -119,12 +157,9 @@ def _source_notices(layout: dict[str, Any]) -> list[dict[str, Any]]:
             # in the raw OCR. Never consume the beginning of a numbered step.
             for follower in lines[pos + 1:]:
                 follower_text = _normalise_space(str(follower.get("text", "")))
-                if (not follower_text
-                        or _SOURCE_NOTICE_RE.match(follower_text)
-                        or not _is_plausible_step_continuation(
-                            line, lines[pos + len(references) - 1],
-                            follower, follower_text,
-                        )):
+                if not _is_plausible_notice_continuation(
+                    line, lines[pos + len(references) - 1], follower,
+                ):
                     break
                 references.append(_line_ref(follower))
             output.append({
