@@ -96,3 +96,24 @@ def test_non_contiguous_steps_still_report_unresolved_error():
 def test_image_callout_numbers_without_sentence_are_not_steps():
     from mems_forge.ocr_strategy_audit import _phase_bounded_numbered_steps
     assert _phase_bounded_numbered_steps("1\n2\n3\n") == []
+
+
+def test_missing_refit_heading_does_not_invent_phase_on_page304():
+    from mems_forge.ocr_strategy_audit import _phase_bounded_numbered_steps
+    # The original PDF page 304 left column has a second 1..7 sequence;
+    # OCR may miss the separate printed Refit heading.
+    lines = ["Remove"] + [
+        f"{number}. Remove instruction {number}" for number in range(1, 9)
+    ] + [f"{number}. Refit source instruction {number}"
+         for number in range(1, 8)]
+    groups = _phase_bounded_numbered_steps("\n".join(lines))
+    assert [x["step_numbers"] for x in groups] == [
+        list(range(1, 9)), list(range(1, 8))
+    ]
+    assert groups[0]["phase"] == "remove"
+    assert groups[0]["sequence_status"] == "contiguous"
+    assert groups[1]["phase"] == "unassigned"
+    assert groups[1]["restart_without_recognized_phase"] is True
+    assert groups[1]["review_required"] is True
+    assert groups[1]["source_phase_heading"] is None
+    assert all(not x["approved_for_technical_database"] for x in groups)
