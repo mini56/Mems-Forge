@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
           python -m pip install . pytest
-          python -m pytest tests/test_source_coordinate_tolerance.py tests/test_ocr_strategy_audit.py tests/test_document_pack.py tests/test_numbered_column_sqlite.py tests/test_adaptive_coverage.py -q
+          python -m pytest tests/test_source_coordinate_tolerance.py tests/test_ocr_strategy_audit.py tests/test_document_pack.py tests/test_numbered_column_sqlite.py tests/test_adaptive_coverage.py tests/test_visual_page_candidate.py -q
       - name: Analyser 12 pages choisies depuis les anomalies reelles du corpus
         shell: bash
         run: |
@@ -244,6 +244,25 @@ jobs:
                   'WHERE approved_for_ai<>0'
               ).fetchone()[0]:
                   raise SystemExit('NUMBERED_OCR_UNVERIFIED_FACTS_APPROVED')
+              visual_status = {
+                  physical: db.execute(
+                      'SELECT v.content_kind,v.inspection_status,'
+                      'v.visual_review_required,v.approved_for_ai '
+                      'FROM pack_ocr_page_content v '
+                      'WHERE v.page_id LIKE ?', (f'%:p{index}',)
+                  ).fetchone()
+                  for index, physical in enumerate(source_pages, 1)
+              }
+              if built['manifest']['counts']['ocr_page_content'] != 12:
+                  raise SystemExit('PDF_PAGE_CONTENT_NOT_RETAINED_IN_SQLITE')
+              if visual_status[15] != (
+                  'BLANK_SCAN', 'CONFIRMED_BLANK_SCAN', 0, 0
+              ):
+                  raise SystemExit('REAL_BLANK_PAGE_MISCLASSIFIED_IN_SQLITE')
+              if visual_status[461] != (
+                  'RASTER_CONTENT', 'VISUAL_CONTENT_WITHOUT_OCR', 1, 0
+              ):
+                  raise SystemExit('REAL_DIAGRAM_WITHOUT_OCR_NOT_FLAGGED')
               if db.execute('SELECT COUNT(*) FROM structured_entities').fetchone()[0]:
                   raise SystemExit('UNVALIDATED_FACTS_PROMOTED_TO_DATABASE')
               if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
@@ -268,6 +287,16 @@ jobs:
                   for segment in groups
               ),
               'adaptive_issues': coverage['issue_counts'],
+              'visual_source_classifications': {
+                  str(p): {
+                      'content_kind': item[0],
+                      'inspection_status': item[1],
+                      'needs_visual_review': bool(item[2]),
+                  }
+                  for p,item in visual_status.items()
+              },
+              'diagram_only_page461_preserved_for_visual_review': True,
+              'blank_page15_skipped': True,
               'page143_missing_step_flagged': True,
               'page304_remove_refit_isolated': True,
               'page304_unlabeled_restart_requires_review': True,
