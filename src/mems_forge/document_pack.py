@@ -247,7 +247,8 @@ def _review_only_cross_page_links(
     page_map = report.get("original_physical_page_map") or {}
     if (set(page_map) != {str(n) for n in range(1, page_count + 1)} or
             any(type(v) is not int or v < 1 for v in page_map.values()) or
-            list(page_map.values()) != sorted(set(page_map.values()))):
+            [page_map[str(n)] for n in range(1, page_count + 1)]
+            != sorted(set(page_map.values()))):
         raise ValueError("CONTINUATION_PHYSICAL_PAGE_MAP_INVALID")
     links = report.get("cross_page_link_candidates") or []
     if (not isinstance(links, list) or
@@ -269,7 +270,7 @@ def _review_only_cross_page_links(
                 or not link["chapter_id"]
                 or not isinstance(link.get("candidate_repair_number"), str)
                 or not re.fullmatch(
-                    r"[0-9]+(?:\\.[0-9]+){1,4}",
+                    r"[0-9]+(?:\.[0-9]+){1,4}",
                     link["candidate_repair_number"]
                 )
                 or link.get("to_region") not in ("left", "right", "body")
