@@ -1,0 +1,140 @@
+name: MEMS Forge - procedures reelles pages voisines (8 pages)
+
+on:
+  push:
+    branches: [fix/page116-304-source-20261111]
+    paths: ['.github/workflows/adjacent-procedure-sample.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  original-adjacent-pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dependances OCR
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          python -m pip install .
+      - name: Diagnostiquer uniquement des pages physiques voisines
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          import pymupdf
+          from mems_forge.full_document_audit import run_full_document_audit
+
+          src = sorted(Path('depot').rglob('*.pdf'))
+          if len(src) != 1 or src[0].read_bytes()[:4] != b'%PDF':
+              raise SystemExit('ORIGINAL_SOURCE_MISSING')
+          selected_pages = [91,92,93,94,303,304,305,306]
+          output = Path('out/adjacent-repairs')
+          output.mkdir(parents=True, exist_ok=True)
+          excerpt = output / 'AKM7169ENG-adjacent-eight.pdf'
+          with pymupdf.open(src[0]) as original:
+              if original.page_count != 482:
+                  raise SystemExit('EXPECTED_482_PAGE_ORIGINAL')
+              with pymupdf.open() as chosen:
+                  for physical in selected_pages:
+                      chosen.insert_pdf(original, from_page=physical-1, to_page=physical-1)
+                  chosen.save(excerpt)
+          sha = hashlib.sha256(excerpt.read_bytes()).hexdigest()
+          result = run_full_document_audit(
+              excerpt, output / 'audit',
+              original_physical_page_map={
+                  i: physical for i, physical in enumerate(selected_pages, 1)
+              }
+          )
+          summary = {
+              'source_sha256': hashlib.sha256(src[0].read_bytes()).hexdigest(),
+              'sample_sha256': sha, 'original_pages': selected_pages,
+              'automatic_procedure_merges': 0, 'per_page': [],
+          }
+          fragment_summary = json.loads(
+              (output / 'audit/fragments/summary.json').read_text()
+          )
+          summary['cross_page_link_candidates'] = fragment_summary[
+              'cross_page_link_candidates'
+          ]
+          for i, physical in enumerate(selected_pages,1):
+              stem = f'page-{i:04d}.json'
+              bases = output / 'audit'
+              layout = json.loads((bases/'layout'/sha/'pages'/stem).read_text())
+              structure = json.loads((bases/'structure'/sha/'pages'/stem).read_text())
+              ocr = json.loads((bases/'ocr'/sha/'pages'/stem).read_text())
+              frag = json.loads((bases/'fragments'/sha/'pages'/stem).read_text())
+              regions = (ocr.get('adaptive_extraction') or {}).get('columns') or {}
+              item = {
+                  'original_page': physical,
+                  'sample_page': i,
+                  'page_class': structure.get('page_class'),
+                  'procedures': [{
+                      'repair_number':p.get('repair_number'),
+                      'title':p.get('title'),
+                      'region':p.get('region'),
+                      'phase_sequences':[{
+                          'label':ph.get('label'),
+                          'numbers':ph.get('step_numbers'),
+                      } for ph in p.get('phases',[])],
+                  } for p in structure.get('procedures',[])],
+                  'fragments':[{
+                      'region': f.get('region'),
+                      'step_numbers': f.get('step_numbers'),
+                      'phase_markers': [p.get('label') for p in f.get('phase_markers',[])],
+                      'context': f.get('context_evidence'),
+                  } for f in frag.get('fragments',[])],
+                  'column_ocr':{
+                      side: {
+                          'phase_sequences': [{
+                              'label': x.get('phase'),
+                              'numbers': x.get('step_numbers'),
+                              'review':x.get('review_required'),
+                          } for x in reg.get('phase_segments',[])],
+                          'excerpt_lines': reg.get('text','').splitlines()[:26],
+                      } for side,reg in regions.items()
+                  },
+                  'ocr_lines':[{
+                      'region': line['region'],
+                      'text':line.get('text','')
+                  } for line in layout.get('lines',[])[:55]],
+                  'review_reasons':ocr.get('review_reasons',[]),
+              }
+              summary['per_page'].append(item)
+          (output/'report.json').write_text(
+              json.dumps(summary,indent=2,ensure_ascii=False),
+              encoding='utf-8'
+          )
+          print('ADJACENT_ORIGINAL_PAGE_DIAGNOSTIC='+json.dumps({
+              'original_pages':selected_pages,
+              'procedure_pages':[p['original_page'] for p in summary['per_page']
+                                 if p['procedures']],
+              'fragment_pages':[p['original_page'] for p in summary['per_page']
+                                if p['fragments']],
+              'link_candidates':len(summary['cross_page_link_candidates']),
+              'per_page':[{
+                  'page':p['original_page'],
+                  'procedures':p['procedures'],
+                  'fragments':p['fragments'],
+                  'columns':p['column_ocr'],
+                  'ocr_lines':p['ocr_lines'][:12],
+              } for p in summary['per_page']],
+          },ensure_ascii=False),flush=True)
+          PY
+      - name: Rapport texte seulement, sans PDF source
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-adjacent-pages-${{ github.run_id }}
+          path: out/adjacent-repairs/report.json
+          retention-days: 7
+          if-no-files-found: warn
