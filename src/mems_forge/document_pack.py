@@ -404,7 +404,8 @@ def build_document_pack(
                  "reviews": 0, "ocr_pages": 0, "ocr_words": 0, "ocr_variants": 0,
                  "ocr_issues": 0, "ocr_source_items": 0,
                  "ocr_numbered_segments": 0, "ocr_numbered_lines": 0,
-                 "ocr_page_content": 0, "procedure_continuation_candidates": 0}
+                 "ocr_page_content": 0, "procedure_continuation_candidates": 0,
+                 "procedure_continuation_steps": 0}
         ocr_members = {}
         with closing(sqlite3.connect(database_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
@@ -706,6 +707,22 @@ def build_document_pack(
                 "CHECK(validation_state='unresolved'),"
                 "approved_for_ai INTEGER NOT NULL DEFAULT 0 CHECK(approved_for_ai=0))"
             )
+            db.execute(
+                "CREATE TABLE pack_procedure_continuation_steps("
+                "candidate_step_id TEXT PRIMARY KEY,"
+                "candidate_id TEXT NOT NULL REFERENCES "
+                "pack_procedure_continuation_candidates(candidate_id),"
+                "step_number INTEGER NOT NULL,"
+                "candidate_text TEXT NOT NULL,"
+                "source_lines_json TEXT NOT NULL,"
+                "source_line_count INTEGER NOT NULL,"
+                "measurement_mentions_json TEXT NOT NULL,"
+                "validation_state TEXT NOT NULL DEFAULT 'unresolved' "
+                "CHECK(validation_state='unresolved'),"
+                "approved_for_ai INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(approved_for_ai=0),"
+                "UNIQUE(candidate_id,step_number))"
+            )
             for index, candidate in enumerate(_review_only_cross_page_links(
                 fragment_root, source_sha, expected_pages,
             )):
@@ -724,6 +741,19 @@ def build_document_pack(
                      json.dumps(candidate["evidence"])),
                 )
                 count["procedure_continuation_candidates"] += 1
+                for step in candidate["fragment_complete_steps"]:
+                    db.execute(
+                        "INSERT INTO pack_procedure_continuation_steps "
+                        "VALUES(?,?,?,?,?,?,?,'unresolved',0)",
+                        (f"{revision}:continuation:{index}:step:{step['number']}",
+                         f"{revision}:continuation:{index}",
+                         step["number"], step["text"],
+                         json.dumps(step["source_lines"], ensure_ascii=False),
+                         step["source_line_count"],
+                         json.dumps(step["measurement_mentions"],
+                                    ensure_ascii=False)),
+                    )
+                    count["procedure_continuation_steps"] += 1
             db.execute(
                 "CREATE TABLE pack_image_occurrences("
                 "revision_id TEXT NOT NULL,page_number INTEGER NOT NULL,"
@@ -1003,6 +1033,18 @@ def inspect_document_pack(path: Path) -> dict:
                         "OR q.physical_page_number<>p.physical_page_number+1 "
                         "OR c.to_original_page<>c.from_original_page+1"
                     ).fetchone()[0] if has_continuation_index else 0)
+                    has_step_index = db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='pack_procedure_continuation_steps'"
+                    ).fetchone() is not None
+                    continuity_steps = (db.execute(
+                        "SELECT COUNT(*) FROM pack_procedure_continuation_steps"
+                    ).fetchone()[0] if has_step_index else 0)
+                    invalid_steps = (db.execute(
+                        "SELECT COUNT(*) FROM pack_procedure_continuation_steps "
+                        "WHERE validation_state<>'unresolved' OR approved_for_ai<>0 "
+                        "OR source_line_count<1 OR step_number<1"
+                    ).fetchone()[0] if has_step_index else 0)
                     incorrectly_approved = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_variants WHERE approved_for_ai<>0"
                     ).fetchone()[0] if table_present else 0)
@@ -1063,6 +1105,8 @@ def inspect_document_pack(path: Path) -> dict:
                             malformed_visual or
                             continuation_count != manifest["counts"].get("procedure_continuation_candidates", 0) or
                             invalid_continuations or
+                            continuity_steps != manifest["counts"].get("procedure_continuation_steps", 0) or
+                            invalid_steps or
                             incorrectly_approved or
                             metadata is None or metadata[0] != "blocked_semantic_review"):
                         return {"valid": False, "error": "sqlite_validation_failed"}
