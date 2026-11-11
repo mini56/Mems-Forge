@@ -233,6 +233,16 @@ def _apply_document_context(
     return filtered_pages
 
 
+def _numbered_repair_family(repair_number: str | None) -> str | None:
+    """Read the leading numbered constructor family, not an inferred chapter."""
+    if not isinstance(repair_number, str):
+        return None
+    head, separator, tail = repair_number.partition(".")
+    if not separator or not tail or not head.isdigit():
+        return None
+    return head
+
+
 def _adjacency_candidates(
     page_results: list[dict[str, Any]],
     hierarchy: dict[int, dict[str, Any]],
@@ -246,6 +256,11 @@ def _adjacency_candidates(
     continuous repair. A candidate link requires actual original physical
     adjacency, a shared manufacturer chapter, an unambiguous previous repair
     identity and either step progression or an explicit Refit heading.
+    If the excerpt has no validated chapter heading, a narrower source-backed
+    exception permits a REVIEW-ONLY candidate when right-page Remove continues
+    as left-page Refit, while the new right-side procedure has a different
+    manufacturer repair number in the same numbered family. The actual chapter
+    remains unresolved; it is never inferred or used to authorize a merge.
     """
     by_page = {int(page["page_number"]): page for page in page_results}
     structures = structures_by_page or {}
@@ -263,9 +278,9 @@ def _adjacency_candidates(
         current = by_page[page_number]
         previous = page_number - 1
         if (not current.get("fragments") or previous not in by_page
-                or real_page[previous] + 1 != real_page[page_number]
-                or not _same_resolved_chapter(hierarchy, previous, page_number)):
+                or real_page[previous] + 1 != real_page[page_number]):
             continue
+        same_chapter = _same_resolved_chapter(hierarchy, previous, page_number)
 
         candidates: list[dict[str, Any]] = []
         for proc in structures.get(previous, {}).get("procedures", []):
@@ -278,6 +293,7 @@ def _adjacency_candidates(
                 continue
             candidates.append({
                 "repair_number": repair,
+                "origin_region": proc.get("region"),
                 "last_step": last["number"],
                 "last_phase": last.get("phase"),
                 "origin_page": previous,
@@ -286,6 +302,7 @@ def _adjacency_candidates(
         for inherited_link in inherited.get(previous, []):
             candidates.append({
                 "repair_number": inherited_link["candidate_repair_number"],
+                "origin_region": inherited_link.get("to_region"),
                 "last_step": inherited_link["fragment_step_numbers"][-1],
                 "last_phase": inherited_link.get("candidate_phase"),
                 "origin_page": inherited_link["origin_procedure_page"],
@@ -313,12 +330,44 @@ def _adjacency_candidates(
                 continue
             if fragment.get("status") != "REVIEW_REQUIRED":
                 continue
+            # Never invent a chapter from scattered OCR. The actual manufacturer
+            # PDF 92(right Remove 12.65.12) -> 93(left Refit) -> 93(right new
+            # 12.65.05) is an unambiguous *candidate* reading transition even
+            # if OCR has lost its chapter/section header. It remains unapproved.
+            cross_page_fallback = False
+            if not same_chapter:
+                repair_family = _numbered_repair_family(origin["repair_number"])
+                new_right_repairs = [
+                    proc.get("repair_number")
+                    for proc in structures.get(page_number, {}).get("procedures", [])
+                    if proc.get("region") == "right"
+                ]
+                cross_page_fallback = bool(
+                    origin["from_kind"] == "explicit_manufacturer_repair_number"
+                    and origin["origin_region"] == "right"
+                    and fragment.get("region") == "left"
+                    and explicit_refit
+                    and origin["last_phase"] in ("remove", "dismantle")
+                    and repair_family is not None
+                    and len(new_right_repairs) == 1
+                    and new_right_repairs[0] != origin["repair_number"]
+                    and _numbered_repair_family(new_right_repairs[0])
+                    == repair_family
+                )
+                if not cross_page_fallback:
+                    continue
             evidence = [
                 "adjacent_original_physical_pages",
-                "same_manufacturer_chapter_candidate",
+                ("same_manufacturer_chapter_candidate" if same_chapter
+                 else "chapter_unresolved_review_required"),
                 origin["from_kind"],
                 "step_numbers_progress" if advances else "explicit_refit_phase_restart",
             ]
+            if cross_page_fallback:
+                evidence += [
+                    "original_right_column_to_next_left_column",
+                    "new_right_column_has_distinct_repair_same_numbered_family",
+                ]
             hint = {
                 "kind": "cross_page_link_candidate",
                 "status": "REVIEW_REQUIRED",
@@ -333,7 +382,10 @@ def _adjacency_candidates(
                     phases[0] if len(phases) == 1 else origin["last_phase"]
                 ),
                 "to_region": fragment.get("region"),
-                "chapter_id": hierarchy[page_number]["chapter_id"],
+                "chapter_id": (
+                    hierarchy[page_number]["chapter_id"]
+                    if same_chapter else "UNRESOLVED"
+                ),
                 "fragment_step_numbers": numbered,
                 "fragment_source_lines": [
                     line.get("source") for line in fragment.get("numbered_lines", [])
