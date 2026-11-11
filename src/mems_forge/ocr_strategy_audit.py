@@ -146,7 +146,7 @@ def _phase_bounded_numbered_steps(text: str) -> list[dict]:
         current["steps"].append({
             "number": number,
             "source_text": value,
-            "validation_state": "OCR_PROCEDURE_CANDIDATE",
+            "validation_state": "OCR_NUMBERED_LINE_CANDIDATE",
             "approved_for_ai": False,
         })
     for segment in groups:
