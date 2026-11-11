@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
           python -m pip install . pytest
-          python -m pytest tests/test_source_coordinate_tolerance.py tests/test_ocr_strategy_audit.py tests/test_document_pack.py -q
+          python -m pytest tests/test_source_coordinate_tolerance.py tests/test_ocr_strategy_audit.py tests/test_document_pack.py tests/test_numbered_column_sqlite.py tests/test_adaptive_coverage.py -q
       - name: Analyser 12 pages choisies depuis les anomalies reelles du corpus
         shell: bash
         run: |
@@ -37,6 +37,7 @@ jobs:
           from pathlib import Path
           import pymupdf
           from mems_forge.full_document_audit import run_full_document_audit
+          from mems_forge.adaptive_coverage import audit_adaptive_coverage
           from mems_forge.document_pack import (
               _anchored_source_items, _bbox_within_original_ocr_region,
               build_document_pack, inspect_document_pack,
@@ -112,7 +113,9 @@ jobs:
                       side: [
                           {
                               'phase': group['phase'],
+                              'source_kind': group['source_kind'],
                               'source_phase_heading': group['source_phase_heading'],
+                              'review_reasons': group['review_reasons'],
                               'step_numbers': group['step_numbers'],
                               'sequence_status': group['sequence_status'],
                               'review_required': group['review_required'],
@@ -130,6 +133,11 @@ jobs:
                   'source_issues': problems,
                   'validator': verdict,
               })
+          coverage = audit_adaptive_coverage(
+              root / 'audit/ocr', sha, len(source_pages)
+          )
+          if not coverage['every_page_evaluated']:
+              raise SystemExit('SAMPLE_ADAPTIVE_COVERAGE_INCOMPLETE')
           by_page = {entry['original_physical_page']: entry for entry in items}
           if by_page[116]['accepted_source_items'] != 19:
               raise SystemExit('ORIGINAL_PAGE_116_19_COMPONENTS_NOT_ACCEPTED')
@@ -137,6 +145,24 @@ jobs:
               raise SystemExit('ORIGINAL_PAGE_304_7_ANCHORS_NOT_ACCEPTED')
           if by_page[304]['source_issues']:
               raise SystemExit('ORIGINAL_PAGE_304_GEOMETRY_QUANTIZATION_NOT_RESOLVED')
+          no_false_phase_conflicts = [
+              source_page for source_page in (92,129,304)
+              if any(issue in coverage['pages'][source_pages.index(source_page)]['issues']
+                     for issue in (
+                         'COLUMN_LEFT_STEP_NUMBER_CONFLICT',
+                         'COLUMN_RIGHT_STEP_NUMBER_CONFLICT',
+                     ))
+          ]
+          if no_false_phase_conflicts:
+              raise SystemExit(
+                  f'LEGITIMATE_REMOVE_REFIT_NUMBERING_FALSE_CONFLICT:{no_false_phase_conflicts}'
+              )
+          if ('COLUMN_LEFT_NUMBERED_SOURCE_REVIEW' not in
+                  coverage['pages'][source_pages.index(304)]['issues']):
+              raise SystemExit('PAGE304_UNLABELED_RESTART_REVIEW_NOT_RECORDED')
+          if ('COLUMN_LEFT_STEP_NUMBER_CONFLICT' not in
+                  coverage['pages'][source_pages.index(143)]['issues']):
+              raise SystemExit('PAGE143_MISSING_NUMBER_5_NOT_FLAGGED')
           left_phases = by_page[304]['phase_groups']['left']
           right_phases = by_page[304]['phase_groups']['right']
           if ([s['phase'] for s in left_phases] != ['remove', 'unassigned']
@@ -184,6 +210,40 @@ jobs:
               }
               if item_counts[116] != 19 or item_counts[304] != 7:
                   raise SystemExit('ANCHORS_NOT_RETAINED_IN_CANDIDATE_SQLITE')
+              numbered_line_counts = {
+                  original_page: db.execute(
+                      'SELECT COUNT(*) FROM pack_ocr_numbered_lines l '
+                      'JOIN pack_ocr_numbered_segments s '
+                      'ON l.segment_id=s.segment_id '
+                      'WHERE s.page_id LIKE ?', (f'%:p{index}',)
+                  ).fetchone()[0]
+                  for index, original_page in enumerate(source_pages, start=1)
+              }
+              expected_lines = {
+                  physical: sum(
+                      len(segment['step_numbers'])
+                      for groups in page['phase_groups'].values()
+                      for segment in groups
+                  ) for physical, page in by_page.items()
+              }
+              if numbered_line_counts != expected_lines:
+                  raise SystemExit('CANDIDATE_NUMBERED_LINES_NOT_ALL_INDEXED')
+              if numbered_line_counts[304] != 23:
+                  raise SystemExit('PAGE304_23_STEPS_NOT_INDIVIDUALLY_INDEXED')
+              if numbered_line_counts[182] < 90:
+                  raise SystemExit('PAGE182_NUMBERED_SOURCE_NOT_INDEXED')
+              unlabeled = db.execute(
+                  "SELECT COUNT(*) FROM pack_ocr_numbered_segments "
+                  "WHERE heading_explicit=0 "
+                  "AND (phase<>'unassigned' OR review_required<>1)"
+              ).fetchone()[0]
+              if unlabeled:
+                  raise SystemExit('UNCLASSIFIED_NUMBERS_PREMATURELY_LABELED')
+              if db.execute(
+                  'SELECT COUNT(*) FROM pack_ocr_numbered_lines '
+                  'WHERE approved_for_ai<>0'
+              ).fetchone()[0]:
+                  raise SystemExit('NUMBERED_OCR_UNVERIFIED_FACTS_APPROVED')
               if db.execute('SELECT COUNT(*) FROM structured_entities').fetchone()[0]:
                   raise SystemExit('UNVALIDATED_FACTS_PROMOTED_TO_DATABASE')
               if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
@@ -199,6 +259,16 @@ jobs:
                   str(index): number for index,number in enumerate(source_pages,1)
               },
               'source_anchored_items_by_page': item_counts,
+              'numbered_lines_indexed_by_page': numbered_line_counts,
+              'numbered_source_lines_total': sum(numbered_line_counts.values()),
+              'source_segments_require_review': sum(
+                  int(segment['review_required'])
+                  for page in items
+                  for groups in page['phase_groups'].values()
+                  for segment in groups
+              ),
+              'adaptive_issues': coverage['issue_counts'],
+              'page143_missing_step_flagged': True,
               'page304_remove_refit_isolated': True,
               'page304_unlabeled_restart_requires_review': True,
               'sample_candidate_pack_verified': True,
