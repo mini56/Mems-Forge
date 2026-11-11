@@ -28,6 +28,8 @@ from mems_forge.ocr_strategy_audit import (
     _recover_list_with_two_resolutions, _recheck_two_column_regions,
 )
 from mems_forge.structure_candidates import run_structure_prototype
+from mems_forge.document_hierarchy import run_document_hierarchy_audit
+from mems_forge.procedure_fragments import run_fragment_prototype
 
 FULL_AUDIT_VERSION = "0.1.0"
 DEFAULT_DPI = 300
@@ -328,8 +330,9 @@ def run_full_document_audit(
     output_root: pathlib.Path,
     *,
     dpi: int = DEFAULT_DPI,
+    original_physical_page_map: dict[int, int] | None = None,
 ) -> dict[str, Any]:
-    """Run the complete non-publishing extraction audit on one source PDF."""
+    """Extract and link only unresolved candidates. Never publish technical facts."""
     pdf_path = pathlib.Path(pdf_path)
     output_root = pathlib.Path(output_root)
     source_sha = _sha256_file(pdf_path)
@@ -341,6 +344,15 @@ def run_full_document_audit(
     ocr_summary = _run_full_ocr(pdf_path, ocr_root, dpi=dpi)
     layout_summary = run_layout_prototype(ocr_root, layout_root)
     structure_summary = run_structure_prototype(layout_root, structure_root)
+    hierarchy_summary = run_document_hierarchy_audit(
+        layout_root, structure_root, output_root / "hierarchy",
+    )
+    fragment_summary = run_fragment_prototype(
+        layout_root, structure_root, output_root / "fragments",
+        hierarchy_root=output_root / "hierarchy",
+        source_pdf_sha256=source_sha,
+        original_physical_page_map=original_physical_page_map,
+    )
     structure_pages = _load_structure_pages(structure_root)
 
     class_counts = Counter(page["page_class"] for page in structure_pages)
@@ -416,6 +428,17 @@ def run_full_document_audit(
                     if procedure.get("repair_number")
                 }
             ),
+        },
+        "hierarchy": {
+            "chapter_candidates": hierarchy_summary["chapter_candidate_count"],
+            "publication_gate": hierarchy_summary["publication_gate"],
+        },
+        "cross_page_procedures": {
+            "fragment_candidates": fragment_summary["continuation_fragment_count"],
+            "link_candidates": fragment_summary["cross_page_link_candidate_count"],
+            "automatic_merges": 0,
+            "original_physical_page_map": fragment_summary["original_physical_page_map"],
+            "publication_gate": fragment_summary["publication_gate"],
         },
         "adaptive_coverage": ocr_summary["adaptive_coverage"],
         "publication_gate": "BLOCKED_REVIEW",
