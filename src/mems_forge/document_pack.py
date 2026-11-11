@@ -12,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import re
 import tempfile
 import zipfile
 
@@ -97,6 +98,55 @@ def _adaptive_ocr_evidence(page_data: dict, page_number: int) -> tuple[list, lis
     return variants, issues
 
 
+_NUMBERED_SOURCE = re.compile(r"^\\s*(\\d{1,3})\\s*[.)]\\s+\\w")
+
+
+def _anchored_source_items(page_data: dict, page_number: int) -> list[dict]:
+    """Read only crosschecked, original-PDF OCR coordinates, never AI boxes.
+
+    A complete source text list and its word geometries must agree exactly.
+    No technical interpretation or model applicability is authorized here.
+    """
+    recovered = (page_data.get("adaptive_extraction") or {}).get("recovered_list")
+    if not recovered:
+        return []
+    items = recovered.get("anchored_items") or []
+    if not recovered.get("ocr_locations_crosschecked"):
+        if items:
+            raise ValueError(f"Unverified OCR source anchors on page {page_number}")
+        return []
+    if not recovered.get("independent_render_readings_agree"):
+        raise ValueError(f"OCR source anchors contradict readings on page {page_number}")
+    text_lines = [
+        line.strip() for line in str(recovered.get("candidate_text") or "").splitlines()
+        if _NUMBERED_SOURCE.match(line)
+    ]
+    numbers = recovered.get("numbering", {}).get("numbers")
+    if (not items or len(items) != len(text_lines) or
+            numbers != list(range(1, len(items) + 1)) or
+            int(recovered.get("anchored_item_count", -1)) != len(items)):
+        raise ValueError(f"Incomplete OCR original source anchors on page {page_number}")
+    page_size = page_data.get("pdf_page") or {}
+    width, height = page_size.get("width_points"), page_size.get("height_points")
+    if not isinstance(width, (int, float)) or not isinstance(height, (int, float)):
+        raise ValueError(f"Missing PDF dimensions for OCR anchors on page {page_number}")
+    roi = recovered.get("roi_pdf")
+    if not isinstance(roi, list) or len(roi) != 4:
+        raise ValueError(f"Missing OCR original ROI on page {page_number}")
+    for index, (item, expected_text) in enumerate(zip(items, text_lines), 1):
+        bbox = item.get("bbox_pdf")
+        if (item.get("number") != index or item.get("source_text") != expected_text
+                or item.get("approved_for_ai") is not False
+                or item.get("validation_state") != "OCR_LOCATION_CANDIDATE"
+                or item.get("source") != "original_pdf_tesseract_400dpi_tsv"
+                or not isinstance(bbox, list) or len(bbox) != 4
+                or any(type(v) not in (int, float) for v in bbox)
+                or not (0 <= roi[0] <= bbox[0] < bbox[2] <= roi[2] <= width + 1)
+                or not (0 <= roi[1] <= bbox[1] < bbox[3] <= roi[3] <= height + 1)):
+            raise ValueError(f"Invalid OCR original source item {index} on page {page_number}")
+    return items
+
+
 def build_document_pack(
     pdf_path: Path, output_path: Path, *, reader_root: Path | None = None,
     ocr_root: Path | None = None
@@ -128,7 +178,7 @@ def build_document_pack(
         document = "DOC_" + source_sha[:24]
         count = {"pages": 0, "blocks": 0, "spans": 0, "image_occurrences": 0,
                  "reviews": 0, "ocr_pages": 0, "ocr_words": 0, "ocr_variants": 0,
-                 "ocr_issues": 0}
+                 "ocr_issues": 0, "ocr_source_items": 0}
         ocr_members = {}
         with closing(sqlite3.connect(database_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
@@ -219,6 +269,20 @@ def build_document_pack(
                 "validation_state TEXT NOT NULL DEFAULT 'unresolved' "
                 "CHECK(validation_state='unresolved'))"
             )
+            db.execute(
+                "CREATE TABLE pack_ocr_source_items("
+                "item_id TEXT PRIMARY KEY,"
+                "page_id TEXT NOT NULL REFERENCES pack_ocr_pages(page_id),"
+                "source_number INTEGER NOT NULL,"
+                "source_text TEXT NOT NULL,"
+                "source_bbox_pdf_json TEXT NOT NULL,"
+                "source_method TEXT NOT NULL,"
+                "validation_state TEXT NOT NULL DEFAULT 'unresolved' "
+                "CHECK(validation_state='unresolved'),"
+                "approved_for_ai INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(approved_for_ai=0),"
+                "UNIQUE(page_id,source_number))"
+            )
             if ocr_root is not None:
                 directory = Path(ocr_root) / source_sha
                 pages_dir = directory / "pages"
@@ -269,6 +333,16 @@ def build_document_pack(
                              method, json.dumps(bbox), reason_code, "unresolved"),
                         )
                         count["ocr_issues"] += 1
+                    anchored_items = _anchored_source_items(page_data, n)
+                    for item in anchored_items:
+                        number = int(item["number"])
+                        db.execute(
+                            "INSERT INTO pack_ocr_source_items VALUES(?,?,?,?,?,?,?,0)",
+                            (f"{page_id}:source:{number}", page_id, number,
+                             item["source_text"], json.dumps(item["bbox_pdf"]),
+                             item["source"], "unresolved"),
+                        )
+                        count["ocr_source_items"] += 1
                     for ix, word in enumerate(page_data.get("words") or []):
                         db.execute(
                             "INSERT INTO pack_ocr_words VALUES(?,?,?,?,?,?,?,?)",
@@ -412,6 +486,17 @@ def inspect_document_pack(path: Path) -> dict:
                     ocr_issues = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_issues"
                     ).fetchone()[0] if issue_table_present else 0)
+                    anchored_table_present = db.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='pack_ocr_source_items'"
+                    ).fetchone() is not None
+                    ocr_source_items = (db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_source_items"
+                    ).fetchone()[0] if anchored_table_present else 0)
+                    bad_source_items = (db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_source_items "
+                        "WHERE approved_for_ai<>0 OR validation_state<>'unresolved'"
+                    ).fetchone()[0] if anchored_table_present else 0)
                     incorrectly_approved = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_variants WHERE approved_for_ai<>0"
                     ).fetchone()[0] if table_present else 0)
@@ -463,6 +548,8 @@ def inspect_document_pack(path: Path) -> dict:
                             ocr_pages != manifest["counts"].get("ocr_pages", 0) or
                             ocr_variants != manifest["counts"].get("ocr_variants", 0) or
                             ocr_issues != manifest["counts"].get("ocr_issues", 0) or
+                            ocr_source_items != manifest["counts"].get("ocr_source_items", 0) or
+                            bad_source_items or
                             incorrectly_approved or
                             metadata is None or metadata[0] != "blocked_semantic_review"):
                         return {"valid": False, "error": "sqlite_validation_failed"}
