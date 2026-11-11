@@ -258,6 +258,25 @@ def _review_only_cross_page_links(
     seen = set()
     for link in links:
         start, end = link.get("from_page"), link.get("to_page")
+        evidence = link.get("evidence")
+        if not isinstance(evidence, list):
+            raise ValueError("CONTINUATION_EVIDENCE_INVALID")
+        has_chapter = (
+            "same_manufacturer_chapter_candidate" in evidence
+            and link.get("chapter_id") != "UNRESOLVED"
+        )
+        has_unresolved_chapter_fallback = (
+            link.get("chapter_id") == "UNRESOLVED"
+            and "chapter_unresolved_review_required" in evidence
+            and "original_right_column_to_next_left_column" in evidence
+            and "new_right_column_has_distinct_repair_same_numbered_family" in evidence
+            and "explicit_refit_phase_restart" in evidence
+            and link.get("candidate_phase") == "refit"
+            and link.get("to_region") == "left"
+            and link.get("origin_procedure_page") == start
+        )
+        if not (has_chapter or has_unresolved_chapter_fallback):
+            raise ValueError("CONTINUATION_CHAPTER_EVIDENCE_UNSUPPORTED")
         if (type(start) is not int or type(end) is not int
                 or not 1 <= start < end <= page_count or end != start + 1
                 or page_map[str(start)] + 1 != page_map[str(end)]
@@ -276,7 +295,7 @@ def _review_only_cross_page_links(
                 or link.get("to_region") not in ("left", "right", "body")
                 or link.get("origin_procedure_page", 0) > start
                 or "adjacent_original_physical_pages" not in link.get("evidence", [])
-                or "same_manufacturer_chapter_candidate" not in link.get("evidence", [])):
+                or "adjacent_original_physical_pages" not in evidence):
             raise ValueError("CONTINUATION_CANDIDATE_UNSAFE_SOURCE")
         numbers = link.get("fragment_step_numbers")
         source_lines = link.get("fragment_source_lines")
