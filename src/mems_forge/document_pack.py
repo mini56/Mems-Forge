@@ -644,12 +644,16 @@ def inspect_document_pack(path: Path) -> dict:
                         "SELECT COUNT(*) FROM pack_ocr_source_items "
                         "WHERE approved_for_ai<>0 OR validation_state<>'unresolved'"
                     ).fetchone()[0] if anchored_table_present else 0)
-                    numbered_segments = db.execute(
+                    has_numbered_index = db.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='pack_ocr_numbered_segments'"
+                    ).fetchone() is not None
+                    numbered_segments = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_numbered_segments"
-                    ).fetchone()[0]
-                    numbered_lines = db.execute(
+                    ).fetchone()[0] if has_numbered_index else 0)
+                    numbered_lines = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_numbered_lines"
-                    ).fetchone()[0]
+                    ).fetchone()[0] if has_numbered_index else 0)
                     invalid_numbered_evidence = (
                         db.execute(
                             "SELECT COUNT(*) FROM pack_ocr_numbered_segments "
@@ -662,14 +666,64 @@ def inspect_document_pack(path: Path) -> dict:
                             "SELECT COUNT(*) FROM pack_ocr_numbered_lines "
                             "WHERE validation_state<>'unresolved' OR approved_for_ai<>0"
                         ).fetchone()[0]
-                    )
-                    # A numbered line may be searchable but has no independent
-                    # per-line source coordinates. Keep the parent column ROI
-                    # explicit so search clients cannot mistake it for a pin.
-                    unsupported_positions = db.execute(
+                    ) if has_numbered_index else 0
+                    # No step-level source location is known, only a column ROI.
+                    unsupported_positions = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_numbered_lines "
                         "WHERE source_bbox_scope<>'COLUMN_ROI_ONLY'"
-                    ).fetchone()[0]
+                    ).fetchone()[0] if has_numbered_index else 0)
+                    if has_numbered_index:
+                        rows = db.execute(
+                            "SELECT s.segment_id,s.side,s.segment_index,s.phase,"
+                            "s.source_phase_heading,s.source_kind,"
+                            "s.source_bbox_scope,s.source_bbox_pdf_json,"
+                            "s.heading_explicit,s.review_required,s.sequence_status,"
+                            "s.page_id,v.page_id,v.region,v.candidate_text,"
+                            "v.source_bbox_pdf_json "
+                            "FROM pack_ocr_numbered_segments s "
+                            "JOIN pack_ocr_variants v ON s.variant_id=v.variant_id"
+                        ).fetchall()
+                        for (segment_id, side, pos, phase, heading, kind, scope,
+                             region_bbox, has_heading, review, sequence, page_id,
+                             variant_page, variant_region, variant_text,
+                             variant_bbox) in rows:
+                            expected_groups = _phase_bounded_numbered_steps(variant_text)
+                            if (page_id != variant_page or
+                                    variant_region != "column_" + side or
+                                    scope != "COLUMN_ROI_ONLY" or
+                                    json.loads(region_bbox) != json.loads(variant_bbox) or
+                                    pos < 0 or pos >= len(expected_groups)):
+                                return {
+                                    "valid": False,
+                                    "error": "ocr_numbered_source_provenance_invalid",
+                                }
+                            group = expected_groups[pos]
+                            if (phase != group["phase"] or
+                                    heading != group.get("source_phase_heading") or
+                                    kind != group["source_kind"] or
+                                    has_heading != int(group["source_heading_explicit"]) or
+                                    review != int(group["review_required"]) or
+                                    sequence != group["sequence_status"]):
+                                return {
+                                    "valid": False,
+                                    "error": "ocr_numbered_segment_not_from_source",
+                                }
+                            stored_lines = db.execute(
+                                "SELECT line_index,step_number,source_text,"
+                                "source_bbox_scope FROM pack_ocr_numbered_lines "
+                                "WHERE segment_id=? ORDER BY line_index",
+                                (segment_id,),
+                            ).fetchall()
+                            expected_lines = [
+                                (i, line["number"], line["source_text"],
+                                 "COLUMN_ROI_ONLY")
+                                for i, line in enumerate(group["steps"])
+                            ]
+                            if stored_lines != expected_lines:
+                                return {
+                                    "valid": False,
+                                    "error": "ocr_numbered_line_not_from_source",
+                                }
                     incorrectly_approved = (db.execute(
                         "SELECT COUNT(*) FROM pack_ocr_variants WHERE approved_for_ai<>0"
                     ).fetchone()[0] if table_present else 0)
