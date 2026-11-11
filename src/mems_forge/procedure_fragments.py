@@ -88,6 +88,59 @@ def _is_plausible_step_continuation(
     return True
 
 
+_SOURCE_NOTICE_RE = re.compile(r"^\s*(WARNING|CAUTION|NOTE)\s*:\s*(.*)$", re.IGNORECASE)
+
+
+def _source_notices(layout: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read actual safety/note headings in every body region, even completed repairs.
+
+    Source notices are NOT steps. A notice's relationship to the nearest
+    numbered repair is unknown until independently resolved. Preserve its
+    original TSV line keys and pixel bboxes for the source-proofed SQLite.
+    """
+    page_number = int(layout["page_number"])
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for line in layout.get("lines", []):
+        region = str(line.get("region") or "unknown")
+        if region in {"header", "footer", "spanning", "unknown"}:
+            continue
+        grouped[region].append(line)
+    output: list[dict[str, Any]] = []
+    for region, lines in grouped.items():
+        for pos, line in enumerate(lines):
+            source_text = _normalise_space(str(line.get("text", "")))
+            match = _SOURCE_NOTICE_RE.match(source_text)
+            if not match:
+                continue
+            kind = match.group(1).upper()
+            references = [_line_ref(line)]
+            # A long warning may wrap to an indented second line. Collect
+            # only geometrically adjacent candidates, leave all other content
+            # in the raw OCR. Never consume the beginning of a numbered step.
+            for follower in lines[pos + 1:]:
+                follower_text = _normalise_space(str(follower.get("text", "")))
+                if (not follower_text
+                        or _SOURCE_NOTICE_RE.match(follower_text)
+                        or not _is_plausible_step_continuation(
+                            line, lines[pos + len(references) - 1],
+                            follower, follower_text,
+                        )):
+                    break
+                references.append(_line_ref(follower))
+            output.append({
+                "page_number": page_number,
+                "region": region,
+                "kind": kind,
+                "source_text": " ".join(ref["text"] for ref in references),
+                "source_lines": references,
+                "source_line_count": len(references),
+                "relationship_to_procedure": "UNRESOLVED",
+                "validation_state": "OCR_SOURCE_NOTICE_UNVERIFIED",
+                "approved_for_ai": False,
+            })
+    return output
+
+
 def _region_fragments(layout: dict[str, Any], structure: dict[str, Any]) -> list[dict[str, Any]]:
     page_number = int(layout["page_number"])
     complete_regions = {str(proc.get("region")) for proc in structure.get("procedures", [])}
@@ -208,11 +261,14 @@ def analyze_page_fragments(layout: dict[str, Any], structure: dict[str, Any]) ->
     if int(layout["page_number"]) != int(structure["page_number"]):
         raise ValueError("layout/structure page mismatch")
     fragments = _region_fragments(layout, structure)
+    notices = _source_notices(layout)
     return {
         "fragment_version": FRAGMENT_VERSION,
         "page_number": int(layout["page_number"]),
         "fragment_count": len(fragments),
         "fragments": fragments,
+        "source_notice_count": len(notices),
+        "source_notices": notices,
     }
 
 
@@ -576,6 +632,10 @@ def run_fragment_prototype(
         "continuation_fragment_count": retained_count,
         "rejected_raw_fragment_count": raw_count - retained_count,
         "fragment_pages": [page["page_number"] for page in results if page["fragment_count"]],
+        "source_notice_count": sum(page["source_notice_count"] for page in results),
+        "source_notice_pages": [
+            page["page_number"] for page in results if page["source_notice_count"]
+        ],
         "cross_page_link_candidate_count": len(hints),
         "cross_page_link_candidates": hints,
         "source_pdf_sha256": source_pdf_sha256,
@@ -590,7 +650,10 @@ def run_fragment_prototype(
         "hierarchy_context_used": bool(hierarchy),
         "publication_gate": (
             "BLOCKED_REVIEW"
-            if hints or any(page["fragment_count"] for page in results)
+            if hints or any(
+                page["fragment_count"] or page["source_notice_count"]
+                for page in results
+            )
             else "NO_FRAGMENT_BLOCKER"
         ),
     }
