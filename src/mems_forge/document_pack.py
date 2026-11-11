@@ -226,6 +226,27 @@ def _numbered_column_evidence(page_data: dict, page_number: int) -> list[tuple]:
     return output
 
 
+def _immutable_ocr_line_index(words: list) -> dict[tuple[int, int, int], dict]:
+    """Derive line text and rectangles exclusively from packaged Tesseract TSV."""
+    grouped: dict[tuple[int, int, int], list] = {}
+    for word in words:
+        key = (word.block_num, word.par_num, word.line_num)
+        grouped.setdefault(key, []).append(word)
+    index = {}
+    for key, members in grouped.items():
+        members.sort(key=lambda w: w.left)
+        index[key] = {
+            "text": " ".join(w.text for w in members),
+            "bbox": [
+                min(w.left for w in members),
+                min(w.top for w in members),
+                max(w.left + w.width for w in members),
+                max(w.top + w.height for w in members),
+            ],
+        }
+    return index
+
+
 def _review_only_cross_page_links(
     fragment_root: Path | None, source_sha: str, page_count: int,
 ) -> list[dict]:
@@ -1051,6 +1072,12 @@ def inspect_document_pack(path: Path) -> dict:
                     metadata = db.execute(
                         "SELECT value FROM database_metadata WHERE key='publication_state'"
                     ).fetchone()
+                    source_line_index_by_page = {}
+                    indexed_link_pages = (set(row[0] for row in db.execute(
+                        "SELECT DISTINCT q.physical_page_number "
+                        "FROM pack_procedure_continuation_candidates c "
+                        "JOIN source_pages q ON c.to_page_id=q.page_id"
+                    )) if has_continuation_index else set())
                     # Compare immutable OCR TSV with BOTH the SQLite words
                     # and the searchable text. Checksums alone are insufficient
                     # if one layer was generated from an unrelated OCR result.
@@ -1072,6 +1099,10 @@ def inspect_document_pack(path: Path) -> dict:
                         parsed, warnings = _parse_words(
                             original_tsv.decode("utf-8"), n
                         )
+                        if n in indexed_link_pages:
+                            source_line_index_by_page[n] = _immutable_ocr_line_index(
+                                parsed
+                            )
                         if warnings:
                             return {"valid": False, "error": "ocr_source_tsv_parse_warning",
                                     "page": n}
@@ -1090,6 +1121,77 @@ def inspect_document_pack(path: Path) -> dict:
                         if indexed_words != expected_words:
                             return {"valid": False, "error": "ocr_words_not_from_source_tsv",
                                     "page": n}
+                    if has_step_index:
+                        candidates = db.execute(
+                            "SELECT c.candidate_id,q.physical_page_number,"
+                            "c.step_numbers_json,c.source_lines_json "
+                            "FROM pack_procedure_continuation_candidates c "
+                            "JOIN source_pages q ON c.to_page_id=q.page_id"
+                        ).fetchall()
+                        for candidate_id, page_n, numbers_json, starters_json in candidates:
+                            numbers = json.loads(numbers_json)
+                            starters = json.loads(starters_json)
+                            full_steps = db.execute(
+                                "SELECT step_number,candidate_text,source_lines_json,"
+                                "source_line_count,measurement_mentions_json "
+                                "FROM pack_procedure_continuation_steps "
+                                "WHERE candidate_id=? ORDER BY step_number",
+                                (candidate_id,),
+                            ).fetchall()
+                            if (len(full_steps) != len(numbers)
+                                    or len(starters) != len(numbers)):
+                                return {
+                                    "valid": False,
+                                    "error": "multiline_step_count_mismatch",
+                                }
+                            immutable = source_line_index_by_page.get(page_n)
+                            for i, (number, text, sources_json, count, units_json) in enumerate(full_steps):
+                                sources = json.loads(sources_json)
+                                unit_mentions = json.loads(units_json)
+                                if (number != numbers[i] or not sources
+                                        or len(sources) != count
+                                        or sources[0] != starters[i]
+                                        or unit_mentions != _measured_value_candidates(text)):
+                                    return {
+                                        "valid": False,
+                                        "error": "multiline_step_provenance_inconsistent",
+                                    }
+                                start = STEP_RE.match(str(sources[0].get("text", "")))
+                                if start is None or int(start.group(1)) != number:
+                                    return {
+                                        "valid": False,
+                                        "error": "multiline_step_source_number_mismatch",
+                                    }
+                                reconstructed = _normalise_space(" ".join(
+                                    [start.group(2)] +
+                                    [source_line.get("text", "") for source_line in sources[1:]]
+                                ))
+                                if reconstructed != text:
+                                    return {
+                                        "valid": False,
+                                        "error": "multiline_step_text_not_from_source",
+                                    }
+                                for origin in sources:
+                                    line_key = origin.get("source_line_key")
+                                    bbox = origin.get("bbox")
+                                    if (not isinstance(line_key, list)
+                                            or len(line_key) != 3
+                                            or any(type(x) is not int for x in line_key)
+                                            or not isinstance(bbox, list)
+                                            or len(bbox) != 4):
+                                        return {
+                                            "valid": False,
+                                            "error": "multiline_step_lineage_invalid",
+                                        }
+                                    if immutable is not None:
+                                        canonical = immutable.get(tuple(line_key))
+                                        if (canonical is None
+                                                or canonical["text"] != origin["text"]
+                                                or canonical["bbox"] != bbox):
+                                            return {
+                                                "valid": False,
+                                                "error": "multiline_step_not_from_original_tsv",
+                                            }
                     if (integrity != "ok" or
                             db.execute("PRAGMA foreign_key_check").fetchall() or
                             pages != manifest["source"]["pages"] or
