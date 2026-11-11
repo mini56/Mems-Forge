@@ -127,8 +127,24 @@ def _phase_bounded_numbered_steps(text: str) -> list[dict]:
                 "steps": [],
             }
             groups.append(current)
+        number = int(hit.group(1))
+        if (current["steps"]
+                and number <= current["steps"][-1]["number"]):
+            # A new 1 after 8 may be Refit, another repair or an OCR
+            # duplication. Without a visible heading we must NOT guess which.
+            # Separate the sequence, preserving all original text and the
+            # evidence that the new group has an unresolved identity.
+            current = {
+                "phase": "unassigned",
+                "source_phase_heading": None,
+                "source_heading_explicit": False,
+                "restart_without_recognized_phase": True,
+                "previous_step_number": current["steps"][-1]["number"],
+                "steps": [],
+            }
+            groups.append(current)
         current["steps"].append({
-            "number": int(hit.group(1)),
+            "number": number,
             "source_text": value,
             "validation_state": "OCR_PROCEDURE_CANDIDATE",
             "approved_for_ai": False,
@@ -140,6 +156,10 @@ def _phase_bounded_numbered_steps(text: str) -> list[dict]:
             "not_applicable" if len(numbers) < 2
             else "contiguous" if numbers == list(range(numbers[0], numbers[0]+len(numbers)))
             else "gaps_repeats_or_ocr_conflict"
+        )
+        segment["review_required"] = (
+            segment.get("restart_without_recognized_phase", False)
+            or segment["sequence_status"] == "gaps_repeats_or_ocr_conflict"
         )
         segment["approved_for_technical_database"] = False
     return [segment for segment in groups if segment["steps"]]
