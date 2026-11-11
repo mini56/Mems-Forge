@@ -19,6 +19,7 @@ SEARCH_CONFIG: dict[str, tuple[str, ...]] = {
     "raw_blocks": ("source_text",),
     "pack_ocr_pages": ("text",),
     "pack_ocr_variants": ("candidate_text",),
+    "pack_ocr_source_items": ("source_text",),
 }
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "memslibrary_search": (
@@ -40,6 +41,11 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "pack_ocr_variants": (
         "page_id", "region", "method", "candidate_text",
         "source_bbox_pdf_json", "crosschecked", "approved_for_ai",
+    ),
+    "pack_ocr_source_items": (
+        "page_id", "source_number", "source_text",
+        "source_bbox_pdf_json", "source_method",
+        "validation_state", "approved_for_ai",
     ),
 }
 
