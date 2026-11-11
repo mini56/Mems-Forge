@@ -1,0 +1,73 @@
+name: MEMS Forge - Verifier un vrai pack OCR complet
+
+on:
+  push:
+    branches:
+      - feature/source-evidence-validation-20261110
+    paths:
+      - '.github/workflows/full-ocr-pack-validation.yml'
+      - 'src/mems_forge/source_validation.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit-full-ocr-pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Récupérer les sources de validation
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: Préparer Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Installer MEMS Forge
+        run: python -m pip install .
+      - name: Réutiliser le pack OCR complet précédemment produit sans relancer l'OCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 42870753015 --repo mini56/Mems-Forge \
+            --name mems-forge-full-audit-42870753015 --dir out/original-audit
+      - name: Comparer le pack OCR complet au PDF original et vérifier le blocage IA
+        shell: bash
+        run: |
+          python - <<'PY'
+          import collections
+          import json
+          from pathlib import Path
+          from mems_forge.source_validation import write_source_audit
+
+          packs = list(Path("out/original-audit").rglob("mems-forge-full-ocr-*.zip"))
+          if len(packs) != 1:
+              raise SystemExit(f"EXPECTED_ONE_FULL_OCR_PACK_FOUND_{len(packs)}")
+          report = write_source_audit(
+              packs[0], Path("out/verified") / "full-ocr-source-validation.json"
+          )
+          print("PACK_AUDIT_SUMMARY", json.dumps({
+              "pages": report["pages_checked"],
+              "ocr_pages": report["ocr_pages"],
+              "issues": dict(collections.Counter(x["code"] for x in report["issues"])),
+              "reviews": dict(collections.Counter(x["code"] for x in report["reviews"])),
+              "native_parity_ok": report["native_source_parity_ok"],
+              "publication_state": report["publication_state"],
+              "approved_for_ai": report["approved_for_ai"],
+          }, ensure_ascii=False))
+          if (not report["native_source_parity_ok"] or
+                  report["ocr_pages"] != report["source_pages"] or
+                  report["approved_for_release"] or report["approved_for_ai"]):
+              raise SystemExit("FULL_OCR_PACK_VALIDATION_GUARD_FAILED")
+          PY
+      - name: Partager le rapport uniquement, jamais les originaux PDF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-verified-full-ocr-${{ github.run_id }}
+          path: out/verified/
+          if-no-files-found: warn
+          retention-days: 14

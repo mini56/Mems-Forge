@@ -1,0 +1,123 @@
+name: MEMS Forge - comparaison OCR sur PDF original
+
+on:
+  push:
+    branches:
+      - feature/source-evidence-validation-20261110
+    paths:
+      - 'src/mems_forge/ocr_strategy_audit.py'
+      - 'tests/test_ocr_strategy_audit.py'
+      - '.github/workflows/ocr-original-comparison.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Récupérer le document original et le code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Installer Tesseract et MEMS Forge
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          python -m pip install . pytest
+      - name: Tester le détecteur d'anomalies de numérotation
+        run: python -m pytest tests/test_ocr_strategy_audit.py -q
+      - name: Comparer directement la page à 2 colonnes et la liste de 19 composants
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from mems_forge.ocr_strategy_audit import write_raster_strategy_audit
+
+          sources = sorted(Path("depot").rglob("*.pdf"))
+          sources += sorted(Path("depot").rglob("*.PDF"))
+          if len(sources) != 1:
+              raise SystemExit("ONE_REAL_SOURCE_PDF_REQUIRED")
+          source = sources[0]
+          if source.open("rb").read(4) != b"%PDF":
+              raise SystemExit("PDF_LFS_POINTER_NOT_A_REAL_DOCUMENT")
+          for page in (92, 116):
+              report = write_raster_strategy_audit(
+                  source, page, Path("out/ocr-strategies") / f"page-{page:04d}.json"
+              )
+              print(json.dumps({
+                  "page": page,
+                  "layout": report["layout"],
+                  "psm3_list": report["numbering"]["psm3_whole"],
+                  "psm4_list": report["numbering"]["psm4_whole"],
+                  "region_lists": {
+                      region: entry["numbering"]
+                      for region, entry in report["regions"].items()
+                  },
+                  "flags": [d["code"] for d in report["defects"]],
+                  "accepted_for_database": report["approved_for_technical_database"],
+              }, ensure_ascii=False))
+              if report["approved_for_technical_database"]:
+                  raise SystemExit("REJECT_UNVERIFIED_OCR")
+              if page == 92:
+                  if report["layout"] != "two_columns":
+                      raise SystemExit("TWO_COLUMN_LAYOUT_NOT_IDENTIFIED")
+                  if ("Clean crankshaft pulley" not in report["regions"]["left"]["text"] or
+                          "TIMING CHAIN" not in report["regions"]["right"]["text"]):
+                      raise SystemExit("TWO_COLUMN_REGIONAL_READ_FAILED")
+                  if report["regions"]["left"]["numbering"]["numbers"] != list(range(1,22)):
+                      raise SystemExit("LEFT_COLUMN_ALL_21_STEPS_NOT_RECOVERED")
+                  if report["regions"]["right"]["numbering"]["numbers"] != list(range(1,8)):
+                      raise SystemExit("RIGHT_COLUMN_ALL_7_STEPS_NOT_RECOVERED")
+              if page == 116:
+                  psm3 = report["numbering"]["psm3_whole"]
+                  psm4 = report["numbering"]["psm4_whole"]
+                  if psm4["count"] <= psm3["count"] or psm4["count"] < 15:
+                      raise SystemExit("AUTOMATIC_ALTERNATIVE_OCR_NOT_IMPROVING_LIST")
+                  if not any(d["code"] == "OCR_MODES_DISAGREE" for d in report["defects"]):
+                      raise SystemExit("DIVERGENT_OCR_NOT_FLAGGED")
+                  recovered = report["recovered_list"]
+                  if not recovered:
+                      raise SystemExit("VERTICALLY_COLLAPSED_LIST_NOT_DETECTED")
+                  if not recovered["independent_render_readings_agree"]:
+                      raise SystemExit("LIST_NOT_CROSSCHECKED_AT_200_AND_400_DPI")
+                  if recovered["numbering"]["numbers"] != list(range(1, 20)):
+                      raise SystemExit("SOURCE_HAS_19_COMPONENTS_OCR_NOT_RECOVERED")
+                  if "Manifold PTC heater" not in recovered["candidate_text"]:
+                      raise SystemExit("COMPONENT_NINE_DESCRIPTION_NOT_RECOVERED")
+                  if "Purge valve" not in recovered["candidate_text"]:
+                      raise SystemExit("COMPONENT_EIGHTEEN_NOT_RECOVERED")
+                  expected = [
+                      "1. Oxygen sensor", "2. Inertia switch", "3. Fuel pump",
+                      "4. Throttle potentiometer", "5. Fuel pressure regulator",
+                      "6. Injector", "7. Stepper motor",
+                      "8. Intake air temperature sensor",
+                      "9. Manifold PTC heater", "10. Coolant temperature sensor",
+                      "11. Distributor", "12. Crankshaft sensor",
+                      "13. Diagnostic connector", "14. ECU", "15. Relay module",
+                      "16. Ignition coil", "17. Oxygen sensor relay",
+                      "18. Purge valve", "19. Charcoal canister",
+                  ]
+                  actual = [
+                      line.strip() for line in
+                      recovered["candidate_text"].splitlines()
+                      if line.strip() and line.strip()[0].isdigit()
+                  ]
+                  if actual != expected:
+                      raise SystemExit("ORIGINAL_19_COMPONENT_LABELS_NOT_EXACT")
+          PY
+      - name: Conserver les rapports seulement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-ocr-comparison-${{ github.run_id }}
+          path: out/ocr-strategies
+          if-no-files-found: warn
+          retention-days: 14

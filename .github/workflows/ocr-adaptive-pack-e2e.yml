@@ -1,0 +1,118 @@
+name: MEMS Forge - OCR adaptatif et pack SQLite de bout en bout
+
+on:
+  push:
+    branches: [feature/source-evidence-validation-20261110]
+    paths:
+      - 'src/mems_forge/full_document_audit.py'
+      - 'src/mems_forge/ocr_strategy_audit.py'
+      - 'src/mems_forge/document_pack.py'
+      - 'src/mems_forge/db_tester.py'
+      - '.github/workflows/ocr-adaptive-pack-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-two-source-pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Récupérer le vrai PDF sans publier ses pages
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Installer Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Installer OCR et MEMS Forge
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          python -m pip install .
+      - name: Construire puis vérifier le pack de 2 pages réelles
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import sqlite3
+          import zipfile
+          import pymupdf
+          from mems_forge.full_document_audit import run_full_document_audit
+          from mems_forge.document_pack import build_document_pack, inspect_document_pack
+          from mems_forge.source_validation import audit_source_pack
+
+          originals = sorted(p for p in Path("depot").rglob("*")
+                             if p.is_file() and p.suffix.lower() == ".pdf")
+          if len(originals) != 1:
+              raise SystemExit("EXACTLY_ONE_REAL_SOURCE_EXPECTED")
+          source = originals[0]
+          if source.open("rb").read(4) != b"%PDF":
+              raise SystemExit("ORIGINAL_PDF_NOT_AVAILABLE")
+          small = Path("out/AKM7169ENG-pages-92-116.pdf")
+          small.parent.mkdir(parents=True, exist_ok=True)
+          with pymupdf.open(source) as original:
+              if original.page_count < 116:
+                  raise SystemExit("ORIGINAL_TOO_SHORT")
+              with pymupdf.open() as extract:
+                  extract.insert_pdf(original, from_page=91, to_page=91)
+                  extract.insert_pdf(original, from_page=115, to_page=115)
+                  extract.save(small)
+
+          root = Path("out/real-two-page-audit")
+          run_full_document_audit(small, root)
+          sha = __import__("hashlib").sha256(small.read_bytes()).hexdigest()
+          pages = root / "ocr" / sha / "pages"
+          left = json.loads((pages / "page-0001.json").read_text())
+          list_page = json.loads((pages / "page-0002.json").read_text())
+          columns = (left.get("adaptive_extraction") or {}).get("columns") or {}
+          recovered = ((list_page.get("adaptive_extraction") or {})
+                       .get("recovered_list"))
+          if not {"left", "right"} <= columns.keys():
+              raise SystemExit("PAGE92_COLUMNS_NOT_RECOVERED")
+          if columns["left"]["numbering"]["numbers"] != list(range(1, 22)):
+              raise SystemExit("PAGE92_21_LEFT_STEPS_NOT_RECOVERED")
+          if columns["right"]["numbering"]["numbers"] != list(range(1, 8)):
+              raise SystemExit("PAGE92_7_RIGHT_STEPS_NOT_RECOVERED")
+          if (not recovered or
+                  not recovered.get("independent_render_readings_agree") or
+                  recovered["numbering"]["numbers"] != list(range(1, 20))):
+              raise SystemExit("PAGE116_COMPONENTS_NOT_CROSSCHECKED")
+
+          pack = Path("out/real-two-page-pack.zip")
+          built = build_document_pack(small, pack, ocr_root=root / "ocr")
+          verdict = inspect_document_pack(pack)
+          audit = audit_source_pack(pack)
+          if (not verdict["valid"] or not audit["native_source_parity_ok"] or
+                  built["manifest"]["counts"]["ocr_variants"] < 3):
+              raise SystemExit("ADAPTIVE_PACK_INTEGRITY_FAILED")
+          with zipfile.ZipFile(pack) as z:
+              dbfile = Path("out/temp-reference.sqlite")
+              dbfile.write_bytes(z.read("data/knowledge.sqlite"))
+          with sqlite3.connect(dbfile) as db:
+              variants = db.execute(
+                  "SELECT region,approved_for_ai,candidate_text,crosschecked "
+                  "FROM pack_ocr_variants ORDER BY page_id,region"
+              ).fetchall()
+              if not all(row[1] == 0 for row in variants):
+                  raise SystemExit("UNVERIFIED_OCR_APPROVED_FOR_AI")
+              if not any(row[0] == "recovered_numbered_list" and
+                         row[3] == 1 and "Manifold PTC heater" in row[2]
+                         for row in variants):
+                  raise SystemExit("SOURCE_LIST_NOT_SEARCHABLE")
+              if db.execute("SELECT COUNT(*) FROM structured_entities").fetchone()[0]:
+                  raise SystemExit("RAW_OCR_PREMATURELY_PROMOTED_TO_KNOWLEDGE")
+          print(json.dumps({
+              "pages": 2,
+              "ocr_variants": len(variants),
+              "page92_columns": sorted(columns.keys()),
+              "page116_component_numbers": recovered["numbering"]["numbers"],
+              "page116_descriptions_match_at_two_resolutions":
+                  recovered["independent_render_readings_agree"],
+              "pack_integrity_verified": True,
+              "technical_publication_approved": False,
+          }, ensure_ascii=False))
+          PY

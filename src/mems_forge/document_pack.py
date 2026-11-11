@@ -18,6 +18,7 @@ import zipfile
 from . import __version__
 from .database import initialize_database
 from .pdf_reader import analyze_pdf, sha256_file
+from .ocr_reader import _parse_words, _words_to_text
 
 
 def records(path: Path):
@@ -35,6 +36,65 @@ def _bbox(value):
 
 def _hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _adaptive_ocr_evidence(page_data: dict, page_number: int) -> tuple[list, list]:
+    """Separate legible source-backed OCR variants from unresolved image regions.
+
+    A missing OCR reading is not a technical fact, and it must not abort a
+    candidate's entire source inventory if the original page explicitly
+    records the failure. It becomes a page/region-scoped issue in SQLite.
+    Any unaccounted-for empty reading or broken geometry is a hard error.
+    """
+    extraction = page_data.get("adaptive_extraction") or {}
+    observations = []
+    recovered = extraction.get("recovered_list")
+    if recovered:
+        observations.append((
+            "recovered_numbered_list", "psm6_200dpi_400dpi",
+            recovered.get("roi_pdf"), recovered.get("candidate_text"),
+            bool(recovered.get("independent_render_readings_agree")),
+        ))
+    for side, reading in sorted((extraction.get("columns") or {}).items()):
+        if side not in ("left", "right") or not isinstance(reading, dict):
+            raise ValueError(f"Unexpected adaptive OCR region on page {page_number}")
+        observations.append((
+            "column_" + side,
+            str(reading.get("candidate_mode") or "unknown"),
+            reading.get("bbox_pdf"), reading.get("text"), False,
+        ))
+    declared = set(page_data.get("adaptive_empty_regions") or [])
+    recorded_reasons = page_data.get("review_reasons") or []
+    variants = []
+    issues = []
+    for region, method, bbox, candidate_text, crosschecked in observations:
+        if (not isinstance(bbox, list) or len(bbox) != 4 or
+                not all(type(value) in (float, int) for value in bbox) or
+                bbox[0] >= bbox[2] or bbox[1] >= bbox[3] or
+                not isinstance(candidate_text, str)):
+            raise ValueError(
+                f"Invalid adaptive OCR provenance on page {page_number}: {region}"
+            )
+        if candidate_text.strip():
+            if region in declared:
+                raise ValueError(
+                    f"Contradictory adaptive OCR review on page {page_number}: {region}"
+                )
+            variants.append((region, method, bbox, candidate_text, crosschecked))
+            continue
+        # Fail closed for missing text, without confusing "nothing recognized"
+        # with evidence that a scanned figure contains no information.
+        if (region not in declared or not page_data.get("review_required") or
+                "adaptive_region_without_text" not in recorded_reasons):
+            raise ValueError(
+                f"Unrecorded empty adaptive OCR region on page {page_number}: {region}"
+            )
+        issues.append((region, method, bbox, "ADAPTIVE_REGION_NO_TEXT"))
+    if declared != {item[0] for item in issues}:
+        raise ValueError(
+            f"Unmatched adaptive OCR review regions on page {page_number}"
+        )
+    return variants, issues
 
 
 def build_document_pack(
@@ -67,7 +127,8 @@ def build_document_pack(
         revision = "REV_" + source_sha
         document = "DOC_" + source_sha[:24]
         count = {"pages": 0, "blocks": 0, "spans": 0, "image_occurrences": 0,
-                 "reviews": 0, "ocr_pages": 0, "ocr_words": 0}
+                 "reviews": 0, "ocr_pages": 0, "ocr_words": 0, "ocr_variants": 0,
+                 "ocr_issues": 0}
         ocr_members = {}
         with closing(sqlite3.connect(database_file)) as db, db:
             db.execute("PRAGMA foreign_keys=ON")
@@ -138,6 +199,26 @@ def build_document_pack(
                 "left_px INTEGER,top_px INTEGER,width_px INTEGER,height_px INTEGER,"
                 "PRIMARY KEY(page_id,word_index))"
             )
+            db.execute(
+                "CREATE TABLE pack_ocr_variants("
+                "variant_id TEXT PRIMARY KEY,"
+                "page_id TEXT NOT NULL REFERENCES pack_ocr_pages(page_id),"
+                "region TEXT NOT NULL,method TEXT NOT NULL,"
+                "source_bbox_pdf_json TEXT NOT NULL,"
+                "candidate_text TEXT NOT NULL,"
+                "crosschecked INTEGER NOT NULL CHECK(crosschecked IN (0,1)),"
+                "approved_for_ai INTEGER NOT NULL DEFAULT 0 CHECK(approved_for_ai=0))"
+            )
+            db.execute(
+                "CREATE TABLE pack_ocr_issues("
+                "issue_id TEXT PRIMARY KEY,"
+                "page_id TEXT NOT NULL REFERENCES pack_ocr_pages(page_id),"
+                "region TEXT NOT NULL,method TEXT NOT NULL,"
+                "source_bbox_pdf_json TEXT NOT NULL,"
+                "reason_code TEXT NOT NULL,"
+                "validation_state TEXT NOT NULL DEFAULT 'unresolved' "
+                "CHECK(validation_state='unresolved'))"
+            )
             if ocr_root is not None:
                 directory = Path(ocr_root) / source_sha
                 pages_dir = directory / "pages"
@@ -168,6 +249,26 @@ def build_document_pack(
                          int(bool(page_data.get("review_required"))), raw["sha256"]),
                     )
                     count["ocr_pages"] += 1
+                    # Enhanced OCR candidate evidence is stored independently
+                    # from the original TSV. No candidate text becomes a
+                    # validated technical fact merely because two modes agree.
+                    variants, issues = _adaptive_ocr_evidence(page_data, n)
+                    for ordinal, (region, method, bbox, candidate_text,
+                                  crosschecked) in enumerate(variants):
+                        db.execute(
+                            "INSERT INTO pack_ocr_variants VALUES(?,?,?,?,?,?,?,0)",
+                            (f"{page_id}:ocrvariant:{ordinal}", page_id,
+                             region, method, json.dumps(bbox),
+                             candidate_text, int(crosschecked)),
+                        )
+                        count["ocr_variants"] += 1
+                    for ordinal, (region, method, bbox, reason_code) in enumerate(issues):
+                        db.execute(
+                            "INSERT INTO pack_ocr_issues VALUES(?,?,?,?,?,?,?)",
+                            (f"{page_id}:ocrissue:{ordinal}", page_id, region,
+                             method, json.dumps(bbox), reason_code, "unresolved"),
+                        )
+                        count["ocr_issues"] += 1
                     for ix, word in enumerate(page_data.get("words") or []):
                         db.execute(
                             "INSERT INTO pack_ocr_words VALUES(?,?,?,?,?,?,?,?)",
@@ -295,13 +396,74 @@ def inspect_document_pack(path: Path) -> dict:
                     integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
                     pages = db.execute("SELECT COUNT(*) FROM source_pages").fetchone()[0]
                     ocr_pages = db.execute("SELECT COUNT(*) FROM pack_ocr_pages").fetchone()[0]
+                    # Format-v1 packs issued before adaptive OCR had no
+                    # variants table; they remain readable and unapproved.
+                    table_present = db.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='pack_ocr_variants'"
+                    ).fetchone() is not None
+                    ocr_variants = (db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_variants"
+                    ).fetchone()[0] if table_present else 0)
+                    issue_table_present = db.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='pack_ocr_issues'"
+                    ).fetchone() is not None
+                    ocr_issues = (db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_issues"
+                    ).fetchone()[0] if issue_table_present else 0)
+                    incorrectly_approved = (db.execute(
+                        "SELECT COUNT(*) FROM pack_ocr_variants WHERE approved_for_ai<>0"
+                    ).fetchone()[0] if table_present else 0)
                     metadata = db.execute(
                         "SELECT value FROM database_metadata WHERE key='publication_state'"
                     ).fetchone()
+                    # Compare immutable OCR TSV with BOTH the SQLite words
+                    # and the searchable text. Checksums alone are insufficient
+                    # if one layer was generated from an unrelated OCR result.
+                    for n in range(1, pages + 1):
+                        page_id = "REV_" + manifest["source"]["sha256"] + f":p{n}"
+                        indexed_page = db.execute(
+                            "SELECT text,raw_tsv_sha256 FROM pack_ocr_pages "
+                            "WHERE page_id=?", (page_id,),
+                        ).fetchone()
+                        if indexed_page is None:
+                            continue
+                        member = f"ocr/page-{n:04d}.tsv.gz"
+                        if member not in archive.namelist():
+                            return {"valid": False, "error": "ocr_source_tsv_missing", "page": n}
+                        original_tsv = gzip.decompress(archive.read(member))
+                        if _hash(original_tsv) != indexed_page[1]:
+                            return {"valid": False, "error": "ocr_source_tsv_sha256_mismatch",
+                                    "page": n}
+                        parsed, warnings = _parse_words(
+                            original_tsv.decode("utf-8"), n
+                        )
+                        if warnings:
+                            return {"valid": False, "error": "ocr_source_tsv_parse_warning",
+                                    "page": n}
+                        if _words_to_text(parsed) != indexed_page[0]:
+                            return {"valid": False, "error": "ocr_text_not_from_source_tsv",
+                                    "page": n}
+                        indexed_words = db.execute(
+                            "SELECT text,confidence,left_px,top_px,width_px,height_px "
+                            "FROM pack_ocr_words WHERE page_id=? ORDER BY word_index",
+                            (page_id,),
+                        ).fetchall()
+                        expected_words = [
+                            (word.text, word.confidence, word.left, word.top,
+                             word.width, word.height) for word in parsed
+                        ]
+                        if indexed_words != expected_words:
+                            return {"valid": False, "error": "ocr_words_not_from_source_tsv",
+                                    "page": n}
                     if (integrity != "ok" or
                             db.execute("PRAGMA foreign_key_check").fetchall() or
                             pages != manifest["source"]["pages"] or
                             ocr_pages != manifest["counts"].get("ocr_pages", 0) or
+                            ocr_variants != manifest["counts"].get("ocr_variants", 0) or
+                            ocr_issues != manifest["counts"].get("ocr_issues", 0) or
+                            incorrectly_approved or
                             metadata is None or metadata[0] != "blocked_semantic_review"):
                         return {"valid": False, "error": "sqlite_validation_failed"}
             return {

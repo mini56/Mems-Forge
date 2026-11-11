@@ -18,6 +18,7 @@ SEARCH_CONFIG: dict[str, tuple[str, ...]] = {
     "structured_entities": ("entity_id", "entity_type", "payload_json"),
     "raw_blocks": ("source_text",),
     "pack_ocr_pages": ("text",),
+    "pack_ocr_variants": ("candidate_text",),
 }
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "memslibrary_search": (
@@ -36,6 +37,10 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "raw_blocks": ("raw_block_id", "page_id", "source_text", "extraction_method"),
     "pack_ocr_pages": ("page_id", "text", "language", "confidence_mean",
                        "review_required", "raw_tsv_sha256"),
+    "pack_ocr_variants": (
+        "page_id", "region", "method", "candidate_text",
+        "source_bbox_pdf_json", "crosschecked", "approved_for_ai",
+    ),
 }
 
 

@@ -60,6 +60,13 @@ def page_review_reasons(page: dict[str, Any]) -> tuple[list[str], dict[str, Any]
     words = list(page.get("words", []))
     semantic = semantic_confidence_summary(words)
     reasons: list[str] = []
+    # Blank scans have been classified from ORIGINAL PDF pixels, not from the
+    # OCR result. A blank physical page is not an OCR recognition failure.
+    if (page.get("page_content") or {}).get("kind") == "BLANK_SCAN":
+        if not words and (page.get("page_content") or {}).get("ocr_skipped"):
+            return [], semantic
+        reasons.append("BLANK_PAGE_CONTRADICTS_OCR_EVIDENCE")
+        return reasons, semantic
 
     if page.get("parse_warnings"):
         reasons.append("ocr_parse_warning")
@@ -117,6 +124,16 @@ def refine_full_ocr_review(full_audit_root: pathlib.Path) -> dict[str, Any]:
     for page_file in page_files:
         page = json.loads(page_file.read_text(encoding="utf-8"))
         reasons, semantic = page_review_reasons(page)
+        # Never erase hard extraction defects just because the OCR's mean
+        # confidence is high. Page 116 is a documented example.
+        hard_reasons = [
+            reason for reason in page.get("review_reasons", [])
+            if reason in {"automatic_region_recovery_failed",
+                          "collapsed_list_ocr_modes_conflict",
+                          "adaptive_region_without_text",
+                          "sparse_visual_content_no_ocr"}
+        ]
+        reasons = list(dict.fromkeys(reasons + hard_reasons))
         localized_word_count = int(semantic["below_85"])
 
         page["ocr_review_version"] = OCR_REVIEW_VERSION
