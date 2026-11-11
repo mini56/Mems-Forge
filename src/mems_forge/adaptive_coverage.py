@@ -39,8 +39,21 @@ def audit_adaptive_coverage(ocr_root: Path, source_sha256: str, page_count: int)
             failures.append("REGION_RECHECK_FAILED")
         if item.get("parse_warnings"):
             failures.append("OCR_TSV_PARSE_WARNINGS")
-        if not item.get("words"):
-            failures.append("NO_OCR_WORDS")
+        visual = item.get("page_content") or {}
+        is_confident_blank = (
+            visual.get("kind") == "BLANK_SCAN"
+            and visual.get("ocr_skipped") is True
+        )
+        if not item.get("words") and not is_confident_blank:
+            failures.append(
+                "SPARSE_PAGE_NO_OCR_WORDS"
+                if visual.get("kind") == "SPARSE_OR_NOISE"
+                else "VISUAL_ONLY_OR_UNRECOGNIZED_CONTENT"
+            )
+        if is_confident_blank and item.get("words"):
+            failures.append("BLANK_PAGE_HAS_OCR_WORDS")
+        if item.get("adaptive_empty_regions"):
+            failures.append("ADAPTIVE_REGIONS_WITHOUT_OCR_TEXT")
         if recovered and not recovered.get("independent_render_readings_agree"):
             failures.append("COLLAPSED_LIST_NOT_RECONCILED")
         for column in ("left", "right"):
@@ -55,7 +68,8 @@ def audit_adaptive_coverage(ocr_root: Path, source_sha256: str, page_count: int)
         # All pages have had the same *evaluation*, but only a subset need
         # expensive regional reruns. No confidence score certifies correctness.
         state = "UNRESOLVED" if failures else (
-            "RECHECKED_OCR_CANDIDATE" if recovered or columns
+            "BLANK_SCAN" if is_confident_blank
+            else "RECHECKED_OCR_CANDIDATE" if recovered or columns
             else "BASELINE_OCR_CHECKED"
         )
         status_counts[state] += 1
@@ -63,6 +77,8 @@ def audit_adaptive_coverage(ocr_root: Path, source_sha256: str, page_count: int)
             "page": n,
             "state": state,
             "ocr_words": len(item.get("words") or []),
+            "visual_content_kind": visual.get("kind", "UNKNOWN"),
+            "skipped_confirmed_blank": is_confident_blank,
             "columns": sorted(columns),
             "vertical_list_rerun": recovered is not None,
             "vertical_list_crosschecked": bool(
