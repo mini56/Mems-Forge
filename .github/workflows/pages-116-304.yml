@@ -1,0 +1,123 @@
+name: MEMS Forge - diagnostic cible pages 116 et 304
+
+on:
+  push:
+    branches: [fix/page116-304-source-20261111]
+    paths:
+      - '.github/workflows/pages-116-304.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-two-original-pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Recuperer le PDF original en lecture seule
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Installer OCR et code source
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          python -m pip install . pytest
+      - name: Analyser uniquement les pages physiques 116 et 304
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          import pymupdf
+          from mems_forge.full_document_audit import run_full_document_audit
+          from mems_forge.document_pack import _anchored_source_items
+
+          sources = sorted(p for p in Path('depot').rglob('*')
+                           if p.is_file() and p.suffix.lower() == '.pdf')
+          if len(sources) != 1 or sources[0].open('rb').read(4) != b'%PDF':
+              raise SystemExit('ORIGINAL_482_PDF_NOT_AVAILABLE')
+          original = sources[0]
+          root = Path('out/pages-116-304')
+          root.mkdir(parents=True, exist_ok=True)
+          extracted = root / 'selected-original-pages.pdf'
+          with pymupdf.open(original) as full:
+              if full.page_count != 482:
+                  raise SystemExit('EXPECTED_482_PAGE_ORIGINAL')
+              with pymupdf.open() as selected:
+                  selected.insert_pdf(full, from_page=115, to_page=115)
+                  selected.insert_pdf(full, from_page=303, to_page=303)
+                  selected.save(extracted)
+          sha = hashlib.sha256(extracted.read_bytes()).hexdigest()
+          run_full_document_audit(extracted, root / 'audit')
+          items = []
+          for index, physical in ((1, 116), (2, 304)):
+              json_file = root / 'audit/ocr' / sha / 'pages' / f'page-{index:04d}.json'
+              page = json.loads(json_file.read_text(encoding='utf-8'))
+              recovered = (page.get('adaptive_extraction') or {}).get('recovered_list') or {}
+              roi = recovered.get('roi_pdf') or []
+              region_entries = recovered.get('anchored_items') or []
+              problems = []
+              for ordinal, item in enumerate(region_entries, 1):
+                  bbox = item.get('bbox_pdf') or []
+                  errors = []
+                  if item.get('number') != ordinal:
+                      errors.append('SEQUENCE_RESTART_OR_NONCONTIGUOUS_NUMBER')
+                  if len(bbox) != 4 or len(roi) != 4:
+                      errors.append('INVALID_GEOMETRY_SHAPE')
+                  elif not (roi[0] <= bbox[0] < bbox[2] <= roi[2] and
+                            roi[1] <= bbox[1] < bbox[3] <= roi[3]):
+                      errors.append('SOURCE_BBOX_OUTSIDE_ROI')
+                  if errors:
+                      problems.append({
+                          'item_index': ordinal,
+                          'source_number': item.get('number'),
+                          'source_text': item.get('source_text'),
+                          'bbox_pdf': bbox,
+                          'roi_pdf': roi,
+                          'reasons': errors,
+                      })
+              try:
+                  saved = _anchored_source_items(page,index)
+                  verdict = 'source_anchors_accepted'
+              except ValueError as error:
+                  saved = []
+                  verdict = str(error)
+              items.append({
+                  'original_physical_page': physical,
+                  'selected_pdf_page': index,
+                  'baseline_ocr_words': len(page.get('words') or []),
+                  'recovered_numbering': (recovered.get('numbering') or {}).get('numbers'),
+                  'recovered_candidate_lines': len((recovered.get('candidate_text') or '').splitlines()),
+                  'crosschecked': recovered.get('independent_render_readings_agree'),
+                  'anchors_crosschecked': recovered.get('ocr_locations_crosschecked'),
+                  'anchored_item_count': len(region_entries),
+                  'accepted_source_items': len(saved),
+                  'columns': sorted(((page.get('adaptive_extraction') or {}).get('columns') or {})),
+                  'review_reasons': page.get('review_reasons'),
+                  'source_issues': problems,
+                  'validator': verdict,
+              })
+          summary = {'original_pages_examined':[116,304],
+                     'original_pages_processed':2,
+                     'source_extraction':items,
+                     'publication_authorized':False}
+          (root / 'diagnostic.json').write_text(
+              json.dumps(summary, indent=2, ensure_ascii=False),
+              encoding='utf-8')
+          print('MEMS_FORGE_TWO_PAGE_DIAGNOSTIC=' +
+                json.dumps(summary, ensure_ascii=False),flush=True)
+          PY
+      - name: Publier seulement le diagnostic, pas les pages PDF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-diagnostic-116-304-${{ github.run_id }}
+          path: out/pages-116-304/diagnostic.json
+          if-no-files-found: warn
+          retention-days: 7
