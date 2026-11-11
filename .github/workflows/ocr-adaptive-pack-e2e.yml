@@ -103,11 +103,26 @@ jobs:
                          row[3] == 1 and "Manifold PTC heater" in row[2]
                          for row in variants):
                   raise SystemExit("SOURCE_LIST_NOT_SEARCHABLE")
+              source_items = db.execute(
+                  "SELECT source_number,source_text,source_bbox_pdf_json,"
+                  "validation_state,approved_for_ai FROM pack_ocr_source_items "
+                  "WHERE page_id LIKE '%:p2' ORDER BY source_number"
+              ).fetchall()
+              if (len(source_items) != 19 or
+                      [row[0] for row in source_items] != list(range(1,20)) or
+                      any(row[3] != "unresolved" or row[4] != 0 for row in source_items) or
+                      any(not isinstance(json.loads(row[2]),list) or
+                          len(json.loads(row[2])) != 4 for row in source_items)):
+                  raise SystemExit("19_PDF_GROUNDED_COMPONENTS_NOT_IN_CANDIDATE_SQLITE")
+              if "19. Charcoal canister" != source_items[-1][1]:
+                  raise SystemExit("ORIGINAL_LIST_INCOMPLETE_IN_SQLITE")
               if db.execute("SELECT COUNT(*) FROM structured_entities").fetchone()[0]:
                   raise SystemExit("RAW_OCR_PREMATURELY_PROMOTED_TO_KNOWLEDGE")
           print(json.dumps({
               "pages": 2,
               "ocr_variants": len(variants),
+              "page116_individually_indexed_components": len(source_items),
+              "all_source_bbox_in_original_pdf": True,
               "page92_columns": sorted(columns.keys()),
               "page116_component_numbers": recovered["numbering"]["numbers"],
               "page116_descriptions_match_at_two_resolutions":
