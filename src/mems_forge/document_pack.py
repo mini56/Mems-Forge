@@ -412,7 +412,9 @@ def _review_only_source_notices(
         page = json.loads(page_file.read_text(encoding="utf-8"))
         notices = page.get("source_notices") or []
         if (page.get("page_number") != page_number
-                or page.get("source_notice_count") != len(notices)):
+                or ("source_notice_count" in page
+                    and page["source_notice_count"] != len(notices))
+                or ("source_notice_count" not in page and notices)):
             raise ValueError("SAFETY_NOTICE_PAGE_EVIDENCE_INCONSISTENT")
         for notice in notices:
             lines = notice.get("source_lines")
@@ -444,7 +446,12 @@ def _review_only_source_notices(
                 **notice,
                 "original_physical_page": original_map[str(page_number)],
             })
-    if len(result) != report.get("source_notice_count"):
+    # Older fragment reports predate the separate notice index and contain
+    # neither a notice count nor notice records. They are valid empty input,
+    # not grounds to invent warnings. New reports must agree with every page.
+    if (("source_notice_count" in report and
+         len(result) != report["source_notice_count"])
+            or ("source_notice_count" not in report and result)):
         raise ValueError("SAFETY_NOTICE_COUNT_MISMATCH")
     return result
 
