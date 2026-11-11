@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
           python -m pip install .
           python -m pip install pytest
-          python -m pytest tests/test_cross_page_procedure_candidates.py tests/test_procedure_fragments.py tests/test_document_pack.py -q
+          python -m pytest tests/test_cross_page_procedure_candidates.py tests/test_procedure_fragments.py tests/test_full_ocr_step_text.py tests/test_document_pack.py -q
       - name: Diagnostiquer uniquement des pages physiques voisines
         shell: bash
         run: |
@@ -114,7 +114,43 @@ jobs:
                   raise SystemExit('TECHNICAL_KNOWLEDGE_PREMATURELY_PROMOTED')
               if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
                   raise SystemExit('MULTIPAGE_SQLITE_CORRUPTED')
+          with sqlite3.connect(dbfile) as db:
+              full_steps = db.execute(
+                  'SELECT step_number,candidate_text,source_line_count,'
+                  'measurement_mentions_json,source_lines_json,approved_for_ai '
+                  'FROM pack_procedure_continuation_steps ORDER BY step_number'
+              ).fetchall()
+              if len(full_steps) != 11:
+                  raise SystemExit(
+                      f'EXPECTED_11_INDEXED_MULTILINE_STEPS_NOT_{len(full_steps)}'
+                  )
+              by_step = {item[0]: item for item in full_steps}
+              expected_values = {3: '0.152 mm', 8: '88 Nm', 9: '22 Nm'}
+              for n, expected in expected_values.items():
+                  entry = by_step[n]
+                  if (expected not in entry[1] or entry[2] < 2
+                          or entry[5] != 0):
+                      raise SystemExit(
+                          f'ORIGINAL_PAGE93_MULTILINE_VALUE_MISSING:{n}:{expected}'
+                      )
+                  numbers = json.loads(entry[3])
+                  if expected not in [x['source_text'] for x in numbers]:
+                      raise SystemExit(
+                          f'ORIGINAL_PAGE93_UNIT_NOT_SOURCED:{n}:{expected}'
+                      )
+                  refs = json.loads(entry[4])
+                  if len(refs) != entry[2]:
+                      raise SystemExit(f'ORIGINAL_PAGE93_STEP_LINEAGE_TRUNCATED:{n}')
+              if by_step[9][2] != 4:
+                  raise SystemExit('PAGE93_22_NM_SPANNING_FOUR_LINES_NOT_PRESERVED')
+              if any(x[5] != 0 for x in full_steps):
+                  raise SystemExit('UNVALIDATED_MULTILINE_STEP_APPROVED')
           dbfile.unlink()
+          summary['candidate_step_count'] = len(full_steps)
+          summary['page93_literal_measurements'] = {
+              str(key): value for key,value in expected_values.items()
+          }
+          summary['page93_multiline_steps_tsv_validated'] = True
           summary['candidate_pack_integrity_validated'] = True
           summary['multpage_92_93_sqlite_provenance_checked'] = True
           summary['unvalidated_multpage_candidates'] = len(repairs)
@@ -185,6 +221,11 @@ jobs:
               } for x in candidates],
               'sqlite_candidate_pack_validated': summary[
                   'candidate_pack_integrity_validated'
+              ],
+              'complete_steps_in_sqlite': summary['candidate_step_count'],
+              'literal_units_original_page93': summary['page93_literal_measurements'],
+              'multi_line_source_tsv_verified': summary[
+                  'page93_multiline_steps_tsv_validated'
               ],
               'technical_knowledge_published': False,
               'per_page':[{
