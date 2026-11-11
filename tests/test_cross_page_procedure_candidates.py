@@ -237,3 +237,67 @@ def test_forged_original_page_map_is_rejected_by_pack_builder(tmp_path: Path):
     with pytest.raises(ValueError, match="CONTINUATION_"):
         build_document_pack(source, destination, fragment_root=fragments)
     assert not destination.exists()
+
+
+def _real_92_to_93_pattern(
+    *, previous_region: str = "right",
+    next_repair: str = "12.65.05",
+    explicit_refit: bool = True,
+    previous_repairs: int = 1,
+    physical: dict[int, int] | None = None,
+) -> list[dict]:
+    old_proc = {
+        "repair_number": "12.65.12",
+        "region": previous_region,
+        "steps": [{"number": i, "phase": "remove"} for i in range(1,8)],
+    }
+    new_proc = {
+        "repair_number": next_repair,
+        "region": "right",
+        "steps": [{"number": i, "phase": "remove"} for i in range(1,5)],
+    }
+    original = {
+        1: {"procedures": [old_proc] * previous_repairs},
+        2: {"procedures": [new_proc]},
+    }
+    page2 = _fragment(2, 1, 11, phase="refit" if explicit_refit else None)
+    return _adjacency_candidates(
+        [
+            {"page_number":1, "fragments":[]},
+            {"page_number":2, "fragments":[page2]},
+        ],
+        {}, original,
+        physical or {1:92, 2:93},
+        "a"*64,
+    )
+
+
+def test_actual_rover_92_93_source_shape_is_a_review_only_candidate():
+    links = _real_92_to_93_pattern()
+    assert len(links) == 1
+    candidate = links[0]
+    assert candidate["from_original_physical_page"] == 92
+    assert candidate["to_original_physical_page"] == 93
+    assert candidate["candidate_repair_number"] == "12.65.12"
+    assert candidate["chapter_id"] == "UNRESOLVED"
+    assert candidate["fragment_step_numbers"] == list(range(1,12))
+    assert "explicit_refit_phase_restart" in candidate["evidence"]
+    assert "chapter_unresolved_review_required" in candidate["evidence"]
+    assert candidate["status"] == "REVIEW_REQUIRED"
+    assert candidate["approved_for_ai"] is False
+
+
+@pytest.mark.parametrize("override", [
+    {"next_repair": "68.15.23"},
+    {"previous_region": "left"},
+    {"explicit_refit": False},
+    {"previous_repairs": 2},
+    {"physical": {1:92, 2:94}},
+])
+def test_unknown_chapter_fallback_refuses_ambiguous_or_disjoint_pages(override):
+    assert _real_92_to_93_pattern(**override) == []
+
+
+def test_no_old_procedure_number_remains_unresolved():
+    original = _real_92_to_93_pattern()
+    assert original[0]["candidate_repair_number"] != "12.65.05"
