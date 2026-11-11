@@ -149,6 +149,7 @@ def test_full_ocr_text_and_raw_tsv_are_searchable_but_not_approved(pdf, tmp_path
         (source / "pages" / f"page-{page:04d}.json").write_text(
             json.dumps({
                 "source_sha256": sha, "page_number": page,
+                "pdf_page": {"width_points": 595.0, "height_points": 842.0},
                 "text": "lambda", "language": "eng",
                 "confidence": {"mean": 93.1}, "review_required": False,
                 "raw_ocr": {"sha256": hashlib.sha256(tsv).hexdigest()},
@@ -157,6 +158,17 @@ def test_full_ocr_text_and_raw_tsv_are_searchable_but_not_approved(pdf, tmp_path
                         "roi_pdf": [10.0, 10.0, 155.0, 70.0],
                         "candidate_text": "1. Recovered coolant sensor",
                         "independent_render_readings_agree": True,
+                        "ocr_locations_crosschecked": True,
+                        "anchored_item_count": 1,
+                        "numbering": {"numbers": [1]},
+                        "anchored_items": [{
+                            "number": 1,
+                            "source_text": "1. Recovered coolant sensor",
+                            "bbox_pdf": [12.0, 15.0, 145.0, 35.0],
+                            "source": "original_pdf_tesseract_400dpi_tsv",
+                            "validation_state": "OCR_LOCATION_CANDIDATE",
+                            "approved_for_ai": False,
+                        }],
                     },
                     "columns": {},
                 } if page == 1 else None),
@@ -169,6 +181,7 @@ def test_full_ocr_text_and_raw_tsv_are_searchable_but_not_approved(pdf, tmp_path
     assert result["manifest"]["counts"]["ocr_pages"] == 2
     assert result["manifest"]["counts"]["ocr_words"] == 2
     assert result["manifest"]["counts"]["ocr_variants"] == 1
+    assert result["manifest"]["counts"]["ocr_source_items"] == 1
     assert result["manifest"]["publication_state"] == "CANDIDATE_NOT_VALIDATED"
     assert inspect_document_pack(target)["valid"]
     with zipfile.ZipFile(target) as bundle:
@@ -181,10 +194,18 @@ def test_full_ocr_text_and_raw_tsv_are_searchable_but_not_approved(pdf, tmp_path
     assert all(x["source_table"] == "pack_ocr_pages" for x in result["results"])
     assert result["results"][0]["fields"]["page_id"].endswith(":p1")
     adapted = search_database(db, "Recovered coolant")
-    assert adapted["count"] == 1
-    assert adapted["results"][0]["source_table"] == "pack_ocr_variants"
-    assert adapted["results"][0]["fields"]["crosschecked"] == 1
-    assert adapted["results"][0]["fields"]["approved_for_ai"] == 0
+    assert adapted["count"] == 2
+    variants = [x for x in adapted["results"]
+                if x["source_table"] == "pack_ocr_variants"]
+    anchors = [x for x in adapted["results"]
+               if x["source_table"] == "pack_ocr_source_items"]
+    assert len(variants) == 1
+    assert variants[0]["fields"]["crosschecked"] == 1
+    assert variants[0]["fields"]["approved_for_ai"] == 0
+    assert len(anchors) == 1
+    assert anchors[0]["fields"]["source_number"] == 1
+    assert anchors[0]["fields"]["approved_for_ai"] == 0
+    assert anchors[0]["fields"]["validation_state"] == "unresolved"
 
     # A rehashed, internally consistent ZIP is still rejected when SQLite
     # search text no longer matches the original OCR TSV.
