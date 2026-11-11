@@ -216,7 +216,7 @@ def _numbered_column_evidence(page_data: dict, page_number: int) -> list[tuple]:
                 raise ValueError(f"Unsafe OCR numbered phase on page {page_number}")
             for item in group["steps"]:
                 if (item.get("approved_for_ai") is not False or
-                        item.get("validation_state") != "OCR_PROCEDURE_CANDIDATE"
+                        item.get("validation_state") != "OCR_NUMBERED_LINE_CANDIDATE"
                         or not item.get("source_text") or
                         int(item.get("number", 0)) < 1):
                     raise ValueError(f"Unsafe numbered OCR line on page {page_number}")
