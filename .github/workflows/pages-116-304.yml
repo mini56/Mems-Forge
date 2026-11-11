@@ -115,6 +115,9 @@ jobs:
                               'source_phase_heading': group['source_phase_heading'],
                               'step_numbers': group['step_numbers'],
                               'sequence_status': group['sequence_status'],
+                              'review_required': group['review_required'],
+                              'restart_without_recognized_phase':
+                                  group.get('restart_without_recognized_phase', False),
                           }
                           for group in section.get('phase_segments', [])
                       ]
@@ -134,6 +137,18 @@ jobs:
               raise SystemExit('ORIGINAL_PAGE_304_7_ANCHORS_NOT_ACCEPTED')
           if by_page[304]['source_issues']:
               raise SystemExit('ORIGINAL_PAGE_304_GEOMETRY_QUANTIZATION_NOT_RESOLVED')
+          left_phases = by_page[304]['phase_groups']['left']
+          right_phases = by_page[304]['phase_groups']['right']
+          if ([s['phase'] for s in left_phases] != ['remove', 'unassigned']
+                  or left_phases[0]['step_numbers'] != list(range(1,9))
+                  or left_phases[1]['step_numbers'] != list(range(1,8))
+                  or not left_phases[1]['review_required']
+                  or not left_phases[1]['restart_without_recognized_phase']):
+              raise SystemExit('PAGE304_MISSING_REFIT_HEADING_MUST_NOT_BE_INVENTED')
+          if ([s['phase'] for s in right_phases] != ['remove','refit']
+                  or right_phases[0]['step_numbers'] != [1,2,3]
+                  or right_phases[1]['step_numbers'] != [1,2,3,4,5]):
+              raise SystemExit('PAGE304_RIGHT_COLUMN_REMOVE_REFIT_NOT_SEPARATED')
           if not (by_page[15]['page_visual_kind'] == 'BLANK_SCAN'
                   and by_page[15]['ocr_skipped']
                   and by_page[15]['baseline_ocr_words'] == 0):
@@ -184,6 +199,8 @@ jobs:
                   str(index): number for index,number in enumerate(source_pages,1)
               },
               'source_anchored_items_by_page': item_counts,
+              'page304_remove_refit_isolated': True,
+              'page304_unlabeled_restart_requires_review': True,
               'sample_candidate_pack_verified': True,
               'original_pdf_retained_in_candidate': True,
               'publication_authorized': False,
