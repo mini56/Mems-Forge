@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
           python -m pip install . pytest
-          python -m pytest tests/test_source_coordinate_tolerance.py tests/test_ocr_strategy_audit.py tests/test_document_pack.py tests/test_numbered_column_sqlite.py tests/test_adaptive_coverage.py tests/test_visual_page_candidate.py -q
+          python -m pytest tests/test_source_coordinate_tolerance.py tests/test_ocr_strategy_audit.py tests/test_document_pack.py tests/test_numbered_column_sqlite.py tests/test_adaptive_coverage.py tests/test_visual_page_candidate.py tests/test_procedure_fragments.py tests/test_cross_page_procedure_candidates.py tests/test_full_document_audit.py -q
       - name: Analyser 12 pages choisies depuis les anomalies reelles du corpus
         shell: bash
         run: |
@@ -61,7 +61,24 @@ jobs:
                       selected.insert_pdf(full, from_page=source_page-1, to_page=source_page-1)
                   selected.save(extracted)
           sha = hashlib.sha256(extracted.read_bytes()).hexdigest()
-          run_full_document_audit(extracted, root / 'audit')
+          full_report = run_full_document_audit(
+              extracted, root / 'audit',
+              original_physical_page_map={
+                  index: page for index, page in enumerate(source_pages, start=1)
+              },
+          )
+          if full_report['cross_page_procedures']['link_candidates'] != 0:
+              raise SystemExit(
+                  'NONADJACENT_EXCERPT_PAGES_FALSELY_LINKED_AS_ONE_REPAIR'
+              )
+          fragment_summary_path = root / 'audit/fragments/summary.json'
+          fragment_summary = json.loads(fragment_summary_path.read_text())
+          if fragment_summary['source_pdf_sha256'] != sha:
+              raise SystemExit('CONTINUATION_FRAGMENT_SOURCE_SHA_MISMATCH')
+          if fragment_summary['original_physical_page_map'] != {
+              str(index): number for index, number in enumerate(source_pages,1)
+          }:
+              raise SystemExit('CONTINUATION_ORIGINAL_PHYSICAL_PAGE_MAP_MISMATCH')
           items = []
           for index, physical in enumerate(source_pages, start=1):
               json_file = root / 'audit/ocr' / sha / 'pages' / f'page-{index:04d}.json'
@@ -188,7 +205,8 @@ jobs:
           # 1..12 are NOT original physical page numbers 7..461.
           sample_pack = root / 'sample-candidate.zip'
           built = build_document_pack(
-              extracted, sample_pack, ocr_root=root / 'audit/ocr'
+              extracted, sample_pack, ocr_root=root / 'audit/ocr',
+              fragment_root=root / 'audit/fragments',
           )
           checked = inspect_document_pack(sample_pack)
           source_audit = audit_source_pack(sample_pack)
@@ -263,6 +281,13 @@ jobs:
                   'RASTER_CONTENT', 'VISUAL_CONTENT_WITHOUT_OCR', 1, 0
               ):
                   raise SystemExit('REAL_DIAGRAM_WITHOUT_OCR_NOT_FLAGGED')
+              candidate_links = db.execute(
+                  'SELECT COUNT(*) FROM pack_procedure_continuation_candidates'
+              ).fetchone()[0]
+              if candidate_links != 0:
+                  raise SystemExit(
+                      'UNJUSTIFIED_MULTIPAGE_LINKS_ON_NONCONSECUTIVE_SAMPLE'
+                  )
               if db.execute('SELECT COUNT(*) FROM structured_entities').fetchone()[0]:
                   raise SystemExit('UNVALIDATED_FACTS_PROMOTED_TO_DATABASE')
               if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
@@ -300,6 +325,9 @@ jobs:
               'page143_missing_step_flagged': True,
               'page304_remove_refit_isolated': True,
               'page304_unlabeled_restart_requires_review': True,
+              'physical_page_link_guard_verified': True,
+              'cross_page_candidate_links_on_nonadjacent_sample': 0,
+              'cross_page_code_unit_tested_on_2_and_3_adjacent_pages': True,
               'sample_candidate_pack_verified': True,
               'original_pdf_retained_in_candidate': True,
               'publication_authorized': False,
