@@ -60,9 +60,26 @@ def audit_adaptive_coverage(ocr_root: Path, source_sha256: str, page_count: int)
             entry = columns.get(column)
             if not entry:
                 continue
-            numbering = entry.get("numbering") or {}
-            if numbering.get("gaps") or numbering.get("repeats"):
-                failures.append(f"COLUMN_{column.upper()}_STEP_NUMBER_CONFLICT")
+            segments = entry.get("phase_segments")
+            if isinstance(segments, list) and segments:
+                # Repeated 1..n is NORMAL when an explicit Remove section is
+                # followed by explicit Refit. Never report a false page-wide
+                # numbering conflict when both independent runs are intact.
+                # A missing phase heading, however, is not automatically
+                # treated as a technical procedure even if numbers are tidy.
+                if any(
+                    segment.get("sequence_status") == "gaps_repeats_or_ocr_conflict"
+                    for segment in segments
+                ):
+                    failures.append(f"COLUMN_{column.upper()}_STEP_NUMBER_CONFLICT")
+                if any(segment.get("review_required") for segment in segments):
+                    failures.append(f"COLUMN_{column.upper()}_NUMBERED_SOURCE_REVIEW")
+            else:
+                # Backwards compatibility for OCR snapshots without phase
+                # segmentation. Preserve the conservative historical flag.
+                numbering = entry.get("numbering") or {}
+                if numbering.get("gaps") or numbering.get("repeats"):
+                    failures.append(f"COLUMN_{column.upper()}_STEP_NUMBER_CONFLICT")
         for failure in failures:
             issue_counts[failure] += 1
         # All pages have had the same *evaluation*, but only a subset need
