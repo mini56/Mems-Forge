@@ -1,0 +1,351 @@
+name: MEMS Forge - procedures reelles pages voisines (8 pages)
+
+on:
+  push:
+    branches: [fix/page116-304-source-20261111]
+    paths: ['.github/workflows/adjacent-procedure-sample.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  original-adjacent-pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dependances OCR
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          python -m pip install .
+          python -m pip install pytest
+          python -m pytest tests/test_cross_page_procedure_candidates.py tests/test_procedure_fragments.py tests/test_full_ocr_step_text.py tests/test_source_safety_notices.py tests/test_document_pack.py -q
+      - name: Diagnostiquer uniquement des pages physiques voisines
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import hashlib, json, sqlite3, zipfile, subprocess, re
+          from pathlib import Path
+          import pymupdf
+          from mems_forge.full_document_audit import run_full_document_audit
+          from mems_forge.document_pack import build_document_pack, inspect_document_pack
+
+          src = sorted(Path('depot').rglob('*.pdf'))
+          if len(src) != 1 or src[0].read_bytes()[:4] != b'%PDF':
+              raise SystemExit('ORIGINAL_SOURCE_MISSING')
+          selected_pages = [91,92,93,94,303,304,305,306]
+          output = Path('out/adjacent-repairs')
+          output.mkdir(parents=True, exist_ok=True)
+          excerpt = output / 'AKM7169ENG-adjacent-eight.pdf'
+          with pymupdf.open(src[0]) as original:
+              if original.page_count != 482:
+                  raise SystemExit('EXPECTED_482_PAGE_ORIGINAL')
+              with pymupdf.open() as chosen:
+                  for physical in selected_pages:
+                      chosen.insert_pdf(original, from_page=physical-1, to_page=physical-1)
+                  chosen.save(excerpt)
+          sha = hashlib.sha256(excerpt.read_bytes()).hexdigest()
+          result = run_full_document_audit(
+              excerpt, output / 'audit',
+              original_physical_page_map={
+                  i: physical for i, physical in enumerate(selected_pages, 1)
+              }
+          )
+          summary = {
+              'source_sha256': hashlib.sha256(src[0].read_bytes()).hexdigest(),
+              'sample_sha256': sha, 'original_pages': selected_pages,
+              'automatic_procedure_merges': 0, 'per_page': [],
+          }
+          fragment_summary = json.loads(
+              (output / 'audit/fragments/summary.json').read_text()
+          )
+          summary['cross_page_link_candidates'] = fragment_summary[
+              'cross_page_link_candidates'
+          ]
+          candidates = summary['cross_page_link_candidates']
+          if len(candidates) != 1:
+              raise SystemExit(
+                  f'EXPECTED_EXACTLY_ONE_REAL_92_93_REPAIR_LINK_NOT_{len(candidates)}'
+              )
+          link = candidates[0]
+          if not (
+              link['from_original_physical_page'] == 92 and
+              link['to_original_physical_page'] == 93 and
+              link['candidate_repair_number'] == '12.65.12' and
+              link['to_region'] == 'left' and
+              link['candidate_phase'] == 'refit' and
+              link['chapter_id'] == 'UNRESOLVED' and
+              link['fragment_step_numbers'] == list(range(1,12)) and
+              link['status'] == 'REVIEW_REQUIRED' and
+              link['approved_for_ai'] is False and
+              'chapter_unresolved_review_required' in link['evidence'] and
+              'original_right_column_to_next_left_column' in link['evidence']
+          ):
+              raise SystemExit('REAL_92_93_LINK_EVIDENCE_NOT_VERIFIED')
+          pack = output / 'candidate-no-publication.zip'
+          built = build_document_pack(
+              excerpt, pack, ocr_root=output/'audit/ocr',
+              fragment_root=output/'audit/fragments',
+          )
+          verified = inspect_document_pack(pack)
+          if not verified['valid'] or verified['state'] != 'CANDIDATE_NOT_VALIDATED':
+              raise SystemExit('MULTIPAGE_CANDIDATE_PACK_NOT_VALIDATED')
+          with zipfile.ZipFile(pack) as bundle:
+              dbfile = output / 'inspect.sqlite'
+              dbfile.write_bytes(bundle.read('data/knowledge.sqlite'))
+              if bundle.read('source/document.pdf') != excerpt.read_bytes():
+                  raise SystemExit('SOURCE_PDF_NOT_RETAINED')
+          with sqlite3.connect(dbfile) as db:
+              repairs = db.execute(
+                  'SELECT from_original_page,to_original_page,'
+                  'candidate_repair_number,to_region,validation_state,approved_for_ai '
+                  'FROM pack_procedure_continuation_candidates'
+              ).fetchall()
+              if repairs != [(92, 93, '12.65.12', 'left', 'unresolved', 0)]:
+                  raise SystemExit(f'MULTIPAGE_REPAIR_MISSING_IN_SQLITE:{repairs}')
+              if db.execute('SELECT COUNT(*) FROM structured_entities').fetchone()[0]:
+                  raise SystemExit('TECHNICAL_KNOWLEDGE_PREMATURELY_PROMOTED')
+              if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                  raise SystemExit('MULTIPAGE_SQLITE_CORRUPTED')
+          with sqlite3.connect(dbfile) as db:
+              full_steps = db.execute(
+                  'SELECT step_number,candidate_text,source_line_count,'
+                  'measurement_mentions_json,source_lines_json,approved_for_ai '
+                  'FROM pack_procedure_continuation_steps ORDER BY step_number'
+              ).fetchall()
+              if len(full_steps) != 11:
+                  raise SystemExit(
+                      f'EXPECTED_11_INDEXED_MULTILINE_STEPS_NOT_{len(full_steps)}'
+                  )
+              by_step = {item[0]: item for item in full_steps}
+              expected_values = {3: '0.152 mm', 8: '88 Nm', 9: '22 Nm'}
+              for n, expected in expected_values.items():
+                  entry = by_step[n]
+                  if (expected not in entry[1] or entry[2] < 2
+                          or entry[5] != 0):
+                      raise SystemExit(
+                          f'ORIGINAL_PAGE93_MULTILINE_VALUE_MISSING:{n}:{expected}'
+                      )
+                  numbers = json.loads(entry[3])
+                  if expected not in [x['source_text'] for x in numbers]:
+                      raise SystemExit(
+                          f'ORIGINAL_PAGE93_UNIT_NOT_SOURCED:{n}:{expected}'
+                      )
+                  refs = json.loads(entry[4])
+                  if len(refs) != entry[2]:
+                      raise SystemExit(f'ORIGINAL_PAGE93_STEP_LINEAGE_TRUNCATED:{n}')
+              if by_step[9][2] != 4:
+                  raise SystemExit('PAGE93_22_NM_SPANNING_FOUR_LINES_NOT_PRESERVED')
+              if any(x[5] != 0 for x in full_steps):
+                  raise SystemExit('UNVALIDATED_MULTILINE_STEP_APPROVED')
+          with sqlite3.connect(dbfile) as db:
+              notices = db.execute(
+                  'SELECT original_physical_page,notice_kind,source_region,'
+                  'source_text,source_line_count,validation_state,approved_for_ai '
+                  'FROM pack_source_notices ORDER BY original_physical_page'
+              ).fetchall()
+              matched_page304 = [
+                  notice for notice in notices
+                  if (notice[0] == 304
+                      and notice[1] == 'WARNING'
+                      and 'Support on safety stands.' in notice[3]
+                      and notice[5] == 'unresolved'
+                      and notice[6] == 0)
+              ]
+              if not matched_page304:
+                  raise SystemExit(
+                      'REAL_304_SAFETY_WARNING_MISSING_FROM_SQLITE'
+                  )
+              if built['manifest']['counts']['safety_notice_candidates'] != len(notices):
+                  raise SystemExit('SAFETY_NOTICE_MANIFEST_AND_SQLITE_DISAGREE')
+          for original_page, text_prefix in (
+                  (94, 'Note: Retain the push rods'),
+                  (306, 'Note: Support driving flange')):
+              wrapped = [
+                  row for row in notices
+                  if row[0] == original_page and row[1] == 'NOTE'
+                  and row[3].startswith(text_prefix)
+              ]
+              if not wrapped or all(row[4] < 2 for row in wrapped):
+                  raise SystemExit(
+                      f'REAL_SOURCE_NOTE_PARAGRAPH_TRUNCATED_PAGE_{original_page}'
+                  )
+          summary['source_notice_count'] = len(notices)
+          summary['original_page304_warning_preserved'] = bool(matched_page304)
+          summary['source_notices_for_review'] = [
+              {
+                  'original_page': item[0],
+                  'kind': item[1],
+                  'region': item[2],
+                  'source_text': item[3],
+                  'source_line_count': item[4],
+                  'approved_for_ai': False,
+              }
+              for item in notices
+          ]
+          # Independent render and fresh OCR probes on original physical
+          # page 93. These are source-reading checks, NOT a semantic approval.
+          expected_values = {3: '0.152 mm', 8: '88 Nm', 9: '22 Nm'}
+          independent_check = {}
+          with pymupdf.open(excerpt) as selected_doc:
+              original_page93 = selected_doc[2]
+              for step_num, phrase in expected_values.items():
+                  sources = json.loads(by_step[step_num][4])
+                  x0 = min(line['bbox'][0] for line in sources)
+                  y0 = min(line['bbox'][1] for line in sources)
+                  x1 = max(line['bbox'][2] for line in sources)
+                  y1 = max(line['bbox'][3] for line in sources)
+                  scale = 72.0 / 300.0
+                  clip = pymupdf.Rect(
+                      max(0, x0 * scale - 3), max(0, y0 * scale - 3),
+                      min(original_page93.rect.width, x1 * scale + 3),
+                      min(original_page93.rect.height, y1 * scale + 3),
+                  )
+                  readings = {}
+                  for resolution in (300, 400):
+                      png_file = output / f'page93-step{step_num}-{resolution}.png'
+                      pix = original_page93.get_pixmap(
+                          matrix=pymupdf.Matrix(resolution/72,resolution/72),
+                          clip=clip, alpha=False,
+                      )
+                      pix.save(png_file)
+                      completed = subprocess.run(
+                          ['tesseract', str(png_file), 'stdout', '-l', 'eng',
+                           '--psm', '6'], capture_output=True,
+                          text=True, check=True,
+                      )
+                      png_file.unlink()
+                      recognized = ' '.join(completed.stdout.split())
+                      verified = bool(re.search(
+                          re.escape(phrase).replace(r'\ ', r'\s*'),
+                          recognized, re.IGNORECASE,
+                      ))
+                      readings[str(resolution)] = {
+                          'literal_found': verified,
+                          'fresh_ocr_text': recognized[:350],
+                      }
+                  independent_check[str(step_num)] = {
+                      'expected_source_ocr_value': phrase,
+                      'rendered_pdf_probe': readings,
+                      'cross_render_agreement': all(
+                          record['literal_found']
+                          for record in readings.values()
+                      ),
+                      'approved_for_technical_answers': False,
+                  }
+          summary['independent_pdf_value_readings'] = independent_check
+          dbfile.unlink()
+          summary['candidate_step_count'] = len(full_steps)
+          summary['page93_literal_measurements'] = {
+              str(key): value for key,value in expected_values.items()
+          }
+          summary['page93_multiline_steps_tsv_validated'] = True
+          summary['candidate_pack_integrity_validated'] = True
+          summary['multpage_92_93_sqlite_provenance_checked'] = True
+          summary['unvalidated_multpage_candidates'] = len(repairs)
+          summary['technical_knowledge_published'] = False
+          for i, physical in enumerate(selected_pages,1):
+              stem = f'page-{i:04d}.json'
+              bases = output / 'audit'
+              layout = json.loads((bases/'layout'/sha/'pages'/stem).read_text())
+              structure = json.loads((bases/'structure'/sha/'pages'/stem).read_text())
+              ocr = json.loads((bases/'ocr'/sha/'pages'/stem).read_text())
+              frag = json.loads((bases/'fragments'/sha/'pages'/stem).read_text())
+              regions = (ocr.get('adaptive_extraction') or {}).get('columns') or {}
+              item = {
+                  'original_page': physical,
+                  'sample_page': i,
+                  'page_class': structure.get('page_class'),
+                  'procedures': [{
+                      'repair_number':p.get('repair_number'),
+                      'title':p.get('title'),
+                      'region':p.get('region'),
+                      'phase_sequences':[{
+                          'label':ph.get('label'),
+                          'numbers':ph.get('step_numbers'),
+                      } for ph in p.get('phases',[])],
+                  } for p in structure.get('procedures',[])],
+                  'fragments':[{
+                      'region': f.get('region'),
+                      'step_numbers': f.get('step_numbers'),
+                      'phase_markers': [p.get('label') for p in f.get('phase_markers',[])],
+                      'context': f.get('context_evidence'),
+                  } for f in frag.get('fragments',[])],
+                  'column_ocr':{
+                      side: {
+                          'phase_sequences': [{
+                              'label': x.get('phase'),
+                              'numbers': x.get('step_numbers'),
+                              'review':x.get('review_required'),
+                          } for x in reg.get('phase_segments',[])],
+                          'excerpt_lines': reg.get('text','').splitlines()[:26],
+                      } for side,reg in regions.items()
+                  },
+                  'ocr_lines':[{
+                      'region': line['region'],
+                      'text':line.get('text','')
+                  } for line in layout.get('lines',[])[:55]],
+                  'review_reasons':ocr.get('review_reasons',[]),
+              }
+              summary['per_page'].append(item)
+          (output/'report.json').write_text(
+              json.dumps(summary,indent=2,ensure_ascii=False),
+              encoding='utf-8'
+          )
+          print('ADJACENT_ORIGINAL_PAGE_DIAGNOSTIC='+json.dumps({
+              'original_pages':selected_pages,
+              'procedure_pages':[p['original_page'] for p in summary['per_page']
+                                 if p['procedures']],
+              'fragment_pages':[p['original_page'] for p in summary['per_page']
+                                if p['fragments']],
+              'link_candidates':len(summary['cross_page_link_candidates']),
+              'candidate_links':[{
+                  'source_pages': [x['from_original_physical_page'],
+                                   x['to_original_physical_page']],
+                  'repair_number': x['candidate_repair_number'],
+                  'phase': x['candidate_phase'],
+                  'step_count': len(x['fragment_step_numbers']),
+                  'status': x['status'],
+                  'chapter_id': x['chapter_id'],
+              } for x in candidates],
+              'sqlite_candidate_pack_validated': summary[
+                  'candidate_pack_integrity_validated'
+              ],
+              'complete_steps_in_sqlite': summary['candidate_step_count'],
+              'literal_units_original_page93': summary['page93_literal_measurements'],
+              'multi_line_source_tsv_verified': summary[
+                  'page93_multiline_steps_tsv_validated'
+              ],
+              'source_warning_count': summary['source_notice_count'],
+              'original_notice_evidence': summary['source_notices_for_review'][:15],
+              'real_page304_warning_preserved': summary[
+                  'original_page304_warning_preserved'
+              ],
+              'original_page93_independent_value_checks': summary[
+                  'independent_pdf_value_readings'
+              ],
+              'technical_knowledge_published': False,
+              'per_page':[{
+                  'page':p['original_page'],
+                  'procedures':p['procedures'],
+                  'fragments':p['fragments'],
+                  'columns':p['column_ocr'],
+                  'ocr_lines':p['ocr_lines'][:12],
+              } for p in summary['per_page']],
+          },ensure_ascii=False),flush=True)
+          PY
+      - name: Rapport texte seulement, sans PDF source
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-adjacent-pages-${{ github.run_id }}
+          path: out/adjacent-repairs/report.json
+          retention-days: 7
+          if-no-files-found: warn

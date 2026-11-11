@@ -1,0 +1,363 @@
+"""Multi-page repair continuity is source-traced, never an automatic merge."""
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+import sqlite3
+import zipfile
+
+import pymupdf
+import pytest
+
+from mems_forge.document_pack import build_document_pack, inspect_document_pack
+from mems_forge.procedure_fragments import _adjacency_candidates
+
+
+def _fragment(page: int, first: int, last: int,
+              *, phase: str | None = None) -> dict:
+    entries = []
+    for number in range(first, last + 1):
+        source_text = f"{number}. Verified transcription candidate {number}"
+        entries.append({
+            "number": number,
+            "text": f"Verified transcription candidate {number}",
+            "source": {
+                "region": "left",
+                "source_line_key": [page, 1, number],
+                "bbox": [20, 25 + number * 20, 240, 38 + number * 20],
+                "mean_confidence": 92.0,
+                "text": source_text,
+            },
+        })
+    return {
+        "kind": "continuation_fragment_candidate",
+        "status": "REVIEW_REQUIRED",
+        "region": "left",
+        "page_number": page,
+        "first_step_number": first,
+        "last_step_number": last,
+        "step_numbers": list(range(first, last + 1)),
+        "phase_markers": [{"label": phase}] if phase else [],
+        "numbered_lines": entries,
+    }
+
+
+def _procedure(number: str = "70.35.10") -> dict:
+    return {
+        "repair_number": number,
+        "region": "left",
+        "steps": [
+            {"number": 1, "phase": "remove"},
+            {"number": 2, "phase": "remove"},
+            {"number": 3, "phase": "remove"},
+        ],
+    }
+
+
+def _links(
+    *, physical: dict[int, int] | None = None,
+    chapters: dict[int, dict] | None = None,
+    structures: dict[int, dict] | None = None,
+    page2: dict | None = None,
+    include_page3: bool = True,
+):
+    details = [
+        {"page_number": 1, "fragments": []},
+        {"page_number": 2, "fragments": [
+            page2 if page2 is not None else _fragment(2, 4, 5),
+        ]},
+    ]
+    if include_page3:
+        details.append({"page_number": 3, "fragments": [_fragment(3, 6, 7)]})
+    contexts = chapters if chapters is not None else {
+        n: {"chapter_id": "chapter-manufacturer-brakes"} for n in
+        range(1, len(details) + 1)
+    }
+    numbers = physical if physical is not None else {
+        n: 120 + n - 1 for n in range(1, len(details) + 1)
+    }
+    structure = structures if structures is not None else {
+        1: {"procedures": [_procedure()]},
+    }
+    return _adjacency_candidates(
+        details, contexts, structure, numbers, "a" * 64
+    )
+
+
+def test_3_consecutive_original_pages_propose_one_repair_not_three():
+    links = _links()
+    assert [(x["from_original_physical_page"],
+             x["to_original_physical_page"]) for x in links] == [
+        (120, 121), (121, 122),
+    ]
+    assert [x["fragment_step_numbers"] for x in links] == [
+        [4, 5], [6, 7],
+    ]
+    assert {x["candidate_repair_number"] for x in links} == {"70.35.10"}
+    assert all(x["approved_for_ai"] is False for x in links)
+    assert all(x["status"] == "REVIEW_REQUIRED" for x in links)
+    assert links[1]["origin_procedure_page"] == 1
+
+
+def test_nonadjacent_selected_pages_can_never_be_linked():
+    assert _links(physical={1: 116, 2: 129, 3: 304}) == []
+
+
+def test_chapter_break_blocks_procedure_crossing():
+    chapters = {
+        1: {"chapter_id": "engine"},
+        2: {"chapter_id": "suspension"},
+        3: {"chapter_id": "suspension"},
+    }
+    assert _links(chapters=chapters) == []
+
+
+def test_ambiguous_two_preceding_repairs_never_get_assigned():
+    assert _links(
+        structures={1: {"procedures": [_procedure(), _procedure("70.35.11")]}},
+    ) == []
+
+
+def test_refit_heading_can_restart_1_as_review_only():
+    links = _links(
+        page2=_fragment(2, 1, 3, phase="refit"),
+        include_page3=False,
+    )
+    assert len(links) == 1
+    assert "explicit_refit_phase_restart" in links[0]["evidence"]
+    assert links[0]["approved_for_ai"] is False
+
+
+def test_reset_without_manufacturer_phase_heading_does_not_link():
+    assert _links(
+        page2=_fragment(2, 1, 3),
+        include_page3=False,
+    ) == []
+
+
+def test_missing_source_chapter_does_not_create_invented_links():
+    assert _links(chapters={}, include_page3=False) == []
+
+
+def test_duplicate_original_physical_page_is_hard_error():
+    with pytest.raises(ValueError, match="PHYSICAL_PAGE_MAPPING_NOT_STRICTLY_INCREASING"):
+        _links(physical={1: 120, 2: 120, 3: 122})
+
+
+def _write_candidate_procedure_report(
+    tmp_path: Path, sha: str, *,
+    mismatched_page_map: bool = False,
+) -> Path:
+    details = [
+        {"page_number": 1, "fragments": []},
+        {"page_number": 2, "fragments": [_fragment(2, 4, 5)]},
+        {"page_number": 3, "fragments": [_fragment(3, 6, 7)]},
+    ]
+    chapter = {n: {"chapter_id": "chapter-manufacturer-brakes"}
+               for n in range(1, 4)}
+    original_map = {1: 120, 2: 121, 3: 122}
+    links = _adjacency_candidates(
+        details, chapter, {1: {"procedures": [_procedure()]}},
+        original_map, sha,
+    )
+    root = tmp_path / "fragments"
+    pages = root / sha / "pages"
+    pages.mkdir(parents=True, exist_ok=True)
+    for page in details:
+        (pages / f"page-{page['page_number']:04d}.json").write_text(
+            json.dumps(page), encoding="utf-8",
+        )
+    if mismatched_page_map:
+        original_map[2] = 129
+    summary = {
+        "source_pdf_sha256": sha,
+        "automatic_procedure_merges": 0,
+        "publication_gate": "BLOCKED_REVIEW",
+        "original_physical_page_map": {
+            str(key): value for key, value in original_map.items()
+        },
+        "cross_page_link_candidate_count": len(links),
+        "cross_page_link_candidates": links,
+    }
+    (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    return root
+
+
+def _pdf3(tmp_path: Path) -> tuple[Path, str]:
+    pdf_path = tmp_path / "workshop.pdf"
+    with pymupdf.open() as pdf:
+        for number in range(1, 4):
+            pdf.new_page().insert_text(
+                (50, 70), f"Workshop source page {number}"
+            )
+        pdf.save(pdf_path)
+    return pdf_path, hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+
+
+def test_3_page_continuations_saved_in_candidate_sqlite(tmp_path: Path):
+    source, sha = _pdf3(tmp_path)
+    fragments = _write_candidate_procedure_report(tmp_path, sha)
+    pack = tmp_path / "unapproved-candidate.zip"
+    result = build_document_pack(source, pack, fragment_root=fragments)
+    assert result["manifest"]["counts"]["procedure_continuation_candidates"] == 2
+    assert inspect_document_pack(pack)["valid"]
+    with zipfile.ZipFile(pack) as zipfile_source:
+        dbfile = tmp_path / "test.sqlite"
+        dbfile.write_bytes(zipfile_source.read("data/knowledge.sqlite"))
+    with sqlite3.connect(dbfile) as db:
+        rows = db.execute(
+            "SELECT from_original_page,to_original_page,candidate_repair_number,"
+            "validation_state,approved_for_ai,step_numbers_json "
+            "FROM pack_procedure_continuation_candidates "
+            "ORDER BY from_original_page"
+        ).fetchall()
+        assert rows == [
+            (120, 121, "70.35.10", "unresolved", 0, "[4, 5]"),
+            (121, 122, "70.35.10", "unresolved", 0, "[6, 7]"),
+        ]
+        assert db.execute(
+            "SELECT COUNT(*) FROM structured_entities"
+        ).fetchone()[0] == 0
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+    from mems_forge.db_tester import search_database
+    found = search_database(dbfile, "70.35.10")
+    assert any(
+        x["source_table"] == "pack_procedure_continuation_candidates"
+        for x in found["results"]
+    )
+
+
+def test_forged_original_page_map_is_rejected_by_pack_builder(tmp_path: Path):
+    source, sha = _pdf3(tmp_path)
+    fragments = _write_candidate_procedure_report(
+        tmp_path, sha, mismatched_page_map=True,
+    )
+    destination = tmp_path / "blocked.zip"
+    with pytest.raises(ValueError, match="CONTINUATION_"):
+        build_document_pack(source, destination, fragment_root=fragments)
+    assert not destination.exists()
+
+
+def _real_92_to_93_pattern(
+    *, previous_region: str = "right",
+    next_repair: str = "12.65.05",
+    explicit_refit: bool = True,
+    previous_repairs: int = 1,
+    physical: dict[int, int] | None = None,
+) -> list[dict]:
+    old_proc = {
+        "repair_number": "12.65.12",
+        "region": previous_region,
+        "steps": [{"number": i, "phase": "remove"} for i in range(1,8)],
+    }
+    new_proc = {
+        "repair_number": next_repair,
+        "region": "right",
+        "steps": [{"number": i, "phase": "remove"} for i in range(1,5)],
+    }
+    original = {
+        1: {"procedures": [old_proc] * previous_repairs},
+        2: {"procedures": [new_proc]},
+    }
+    page2 = _fragment(2, 1, 11, phase="refit" if explicit_refit else None)
+    return _adjacency_candidates(
+        [
+            {"page_number":1, "fragments":[]},
+            {"page_number":2, "fragments":[page2]},
+        ],
+        {}, original,
+        physical or {1:92, 2:93},
+        "a"*64,
+    )
+
+
+def test_actual_rover_92_93_source_shape_is_a_review_only_candidate():
+    links = _real_92_to_93_pattern()
+    assert len(links) == 1
+    candidate = links[0]
+    assert candidate["from_original_physical_page"] == 92
+    assert candidate["to_original_physical_page"] == 93
+    assert candidate["candidate_repair_number"] == "12.65.12"
+    assert candidate["chapter_id"] == "UNRESOLVED"
+    assert candidate["fragment_step_numbers"] == list(range(1,12))
+    assert "explicit_refit_phase_restart" in candidate["evidence"]
+    assert "chapter_unresolved_review_required" in candidate["evidence"]
+    assert candidate["status"] == "REVIEW_REQUIRED"
+    assert candidate["approved_for_ai"] is False
+
+
+@pytest.mark.parametrize("override", [
+    {"next_repair": "68.15.23"},
+    {"previous_region": "left"},
+    {"explicit_refit": False},
+    {"previous_repairs": 2},
+    {"physical": {1:92, 2:94}},
+])
+def test_unknown_chapter_fallback_refuses_ambiguous_or_disjoint_pages(override):
+    assert _real_92_to_93_pattern(**override) == []
+
+
+def test_no_old_procedure_number_remains_unresolved():
+    original = _real_92_to_93_pattern()
+    assert original[0]["candidate_repair_number"] != "12.65.05"
+
+
+def test_three_page_candidate_indexes_complete_step_text_in_sqlite(tmp_path: Path):
+    source, sha = _pdf3(tmp_path)
+    fragment_root = _write_candidate_procedure_report(tmp_path, sha)
+    pack = tmp_path / "multiline-unapproved.zip"
+    result = build_document_pack(source, pack, fragment_root=fragment_root)
+    assert result["manifest"]["counts"]["procedure_continuation_steps"] == 4
+    assert inspect_document_pack(pack)["valid"] is True
+    with zipfile.ZipFile(pack) as archive:
+        db_path = tmp_path / "candidate.sqlite"
+        db_path.write_bytes(archive.read("data/knowledge.sqlite"))
+    with sqlite3.connect(db_path) as db:
+        steps = db.execute(
+            "SELECT step_number,candidate_text,source_line_count,"
+            "measurement_mentions_json,validation_state,approved_for_ai "
+            "FROM pack_procedure_continuation_steps "
+            "ORDER BY candidate_id,step_number"
+        ).fetchall()
+        assert steps == [
+            (number, f"Verified transcription candidate {number}", 1,
+             "[]", "unresolved", 0)
+            for number in (4, 5, 6, 7)
+        ]
+
+
+def test_rehashed_forged_continuation_step_text_is_rejected(tmp_path: Path):
+    source, sha = _pdf3(tmp_path)
+    fragment_root = _write_candidate_procedure_report(tmp_path, sha)
+    candidate = tmp_path / "clean.zip"
+    build_document_pack(source, candidate, fragment_root=fragment_root)
+    with zipfile.ZipFile(candidate) as archive:
+        original_members = {
+            name: archive.read(name) for name in archive.namelist()
+        }
+    changed_db = tmp_path / "changed.sqlite"
+    changed_db.write_bytes(original_members["data/knowledge.sqlite"])
+    with sqlite3.connect(changed_db) as db:
+        db.execute(
+            "UPDATE pack_procedure_continuation_steps "
+            "SET candidate_text='Unsafe fabricated torque 999 Nm' "
+            "WHERE step_number=4"
+        )
+        db.commit()
+    original_members["data/knowledge.sqlite"] = changed_db.read_bytes()
+    manifest = json.loads(original_members["manifest.json"])
+    manifest["members_sha256"]["data/knowledge.sqlite"] = hashlib.sha256(
+        original_members["data/knowledge.sqlite"]
+    ).hexdigest()
+    original_members["manifest.json"] = json.dumps(manifest).encode("utf-8")
+    altered_pack = tmp_path / "rehashed.zip"
+    with zipfile.ZipFile(altered_pack, "w") as archive:
+        for name, content in original_members.items():
+            archive.writestr(name, content)
+    verdict = inspect_document_pack(altered_pack)
+    assert verdict["valid"] is False
+    assert verdict["error"] in (
+        "multiline_step_provenance_inconsistent",
+        "multiline_step_text_not_from_source",
+    )

@@ -1,0 +1,348 @@
+name: MEMS Forge - 10 pages difficiles plus blanche et schema
+
+on:
+  push:
+    branches: [fix/page116-304-source-20261111]
+    paths:
+      - '.github/workflows/pages-116-304.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-two-original-pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Recuperer le PDF original en lecture seule
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Installer OCR et code source
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          python -m pip install . pytest
+          python -m pytest tests/test_source_coordinate_tolerance.py tests/test_ocr_strategy_audit.py tests/test_document_pack.py tests/test_numbered_column_sqlite.py tests/test_adaptive_coverage.py tests/test_visual_page_candidate.py tests/test_procedure_fragments.py tests/test_cross_page_procedure_candidates.py tests/test_full_document_audit.py -q
+      - name: Analyser 12 pages choisies depuis les anomalies reelles du corpus
+        shell: bash
+        run: |
+          python -u - <<'PY'
+          import hashlib, json, sqlite3, zipfile
+          from pathlib import Path
+          import pymupdf
+          from mems_forge.full_document_audit import run_full_document_audit
+          from mems_forge.adaptive_coverage import audit_adaptive_coverage
+          from mems_forge.document_pack import (
+              _anchored_source_items, _bbox_within_original_ocr_region,
+              build_document_pack, inspect_document_pack,
+          )
+          from mems_forge.source_validation import audit_source_pack
+
+          sources = sorted(p for p in Path('depot').rglob('*')
+                           if p.is_file() and p.suffix.lower() == '.pdf')
+          if len(sources) != 1 or sources[0].open('rb').read(4) != b'%PDF':
+              raise SystemExit('ORIGINAL_482_PDF_NOT_AVAILABLE')
+          original = sources[0]
+          root = Path('out/sample-12-pages')
+          root.mkdir(parents=True, exist_ok=True)
+          extracted = root / 'AKM7169ENG-selected-source-pages.pdf'
+          source_pages = [7, 15, 92, 116, 129, 133, 143, 182, 271, 304, 408, 461]
+          with pymupdf.open(original) as full:
+              if full.page_count != 482:
+                  raise SystemExit('EXPECTED_482_PAGE_ORIGINAL')
+              with pymupdf.open() as selected:
+                  for source_page in source_pages:
+                      selected.insert_pdf(full, from_page=source_page-1, to_page=source_page-1)
+                  selected.save(extracted)
+          sha = hashlib.sha256(extracted.read_bytes()).hexdigest()
+          full_report = run_full_document_audit(
+              extracted, root / 'audit',
+              original_physical_page_map={
+                  index: page for index, page in enumerate(source_pages, start=1)
+              },
+          )
+          if full_report['cross_page_procedures']['link_candidates'] != 0:
+              raise SystemExit(
+                  'NONADJACENT_EXCERPT_PAGES_FALSELY_LINKED_AS_ONE_REPAIR'
+              )
+          fragment_summary_path = root / 'audit/fragments/summary.json'
+          fragment_summary = json.loads(fragment_summary_path.read_text())
+          if fragment_summary['source_pdf_sha256'] != sha:
+              raise SystemExit('CONTINUATION_FRAGMENT_SOURCE_SHA_MISMATCH')
+          if fragment_summary['original_physical_page_map'] != {
+              str(index): number for index, number in enumerate(source_pages,1)
+          }:
+              raise SystemExit('CONTINUATION_ORIGINAL_PHYSICAL_PAGE_MAP_MISMATCH')
+          items = []
+          for index, physical in enumerate(source_pages, start=1):
+              json_file = root / 'audit/ocr' / sha / 'pages' / f'page-{index:04d}.json'
+              page = json.loads(json_file.read_text(encoding='utf-8'))
+              recovered = (page.get('adaptive_extraction') or {}).get('recovered_list') or {}
+              roi = recovered.get('roi_pdf') or []
+              region_entries = recovered.get('anchored_items') or []
+              problems = []
+              for ordinal, item in enumerate(region_entries, 1):
+                  bbox = item.get('bbox_pdf') or []
+                  errors = []
+                  if item.get('number') != ordinal:
+                      errors.append('SEQUENCE_RESTART_OR_NONCONTIGUOUS_NUMBER')
+                  if len(bbox) != 4 or len(roi) != 4:
+                      errors.append('INVALID_GEOMETRY_SHAPE')
+                  elif not _bbox_within_original_ocr_region(
+                      bbox, roi,
+                      page['pdf_page']['width_points'],
+                      page['pdf_page']['height_points'],
+                  ):
+                      errors.append('SOURCE_BBOX_OUTSIDE_400DPI_PIXEL_TOLERANCE')
+                  if errors:
+                      problems.append({
+                          'item_index': ordinal,
+                          'source_number': item.get('number'),
+                          'source_text': item.get('source_text'),
+                          'bbox_pdf': bbox,
+                          'roi_pdf': roi,
+                          'reasons': errors,
+                      })
+              try:
+                  saved = _anchored_source_items(page,index)
+                  verdict = 'source_anchors_accepted'
+              except ValueError as error:
+                  saved = []
+                  verdict = str(error)
+              items.append({
+                  'original_physical_page': physical,
+                  'selected_pdf_page': index,
+                  'baseline_ocr_words': len(page.get('words') or []),
+                  'recovered_numbering': (recovered.get('numbering') or {}).get('numbers'),
+                  'recovered_candidate_lines': len((recovered.get('candidate_text') or '').splitlines()),
+                  'crosschecked': recovered.get('independent_render_readings_agree'),
+                  'anchors_crosschecked': recovered.get('ocr_locations_crosschecked'),
+                  'anchored_item_count': len(region_entries),
+                  'accepted_source_items': len(saved),
+                  'columns': sorted(((page.get('adaptive_extraction') or {}).get('columns') or {})),
+                  'phase_groups': {
+                      side: [
+                          {
+                              'phase': group['phase'],
+                              'source_kind': group['source_kind'],
+                              'source_phase_heading': group['source_phase_heading'],
+                              'review_reasons': group['review_reasons'],
+                              'step_numbers': group['step_numbers'],
+                              'sequence_status': group['sequence_status'],
+                              'review_required': group['review_required'],
+                              'restart_without_recognized_phase':
+                                  group.get('restart_without_recognized_phase', False),
+                          }
+                          for group in section.get('phase_segments', [])
+                      ]
+                      for side, section in
+                      ((page.get('adaptive_extraction') or {}).get('columns') or {}).items()
+                  },
+                  'page_visual_kind': (page.get('page_content') or {}).get('kind'),
+                  'ocr_skipped': (page.get('page_content') or {}).get('ocr_skipped'),
+                  'review_reasons': page.get('review_reasons'),
+                  'source_issues': problems,
+                  'validator': verdict,
+              })
+          coverage = audit_adaptive_coverage(
+              root / 'audit/ocr', sha, len(source_pages)
+          )
+          if not coverage['every_page_evaluated']:
+              raise SystemExit('SAMPLE_ADAPTIVE_COVERAGE_INCOMPLETE')
+          by_page = {entry['original_physical_page']: entry for entry in items}
+          if by_page[116]['accepted_source_items'] != 19:
+              raise SystemExit('ORIGINAL_PAGE_116_19_COMPONENTS_NOT_ACCEPTED')
+          if by_page[304]['accepted_source_items'] != 7:
+              raise SystemExit('ORIGINAL_PAGE_304_7_ANCHORS_NOT_ACCEPTED')
+          if by_page[304]['source_issues']:
+              raise SystemExit('ORIGINAL_PAGE_304_GEOMETRY_QUANTIZATION_NOT_RESOLVED')
+          no_false_phase_conflicts = [
+              source_page for source_page in (92,129,304)
+              if any(issue in coverage['pages'][source_pages.index(source_page)]['issues']
+                     for issue in (
+                         'COLUMN_LEFT_STEP_NUMBER_CONFLICT',
+                         'COLUMN_RIGHT_STEP_NUMBER_CONFLICT',
+                     ))
+          ]
+          if no_false_phase_conflicts:
+              raise SystemExit(
+                  f'LEGITIMATE_REMOVE_REFIT_NUMBERING_FALSE_CONFLICT:{no_false_phase_conflicts}'
+              )
+          if ('COLUMN_LEFT_NUMBERED_SOURCE_REVIEW' not in
+                  coverage['pages'][source_pages.index(304)]['issues']):
+              raise SystemExit('PAGE304_UNLABELED_RESTART_REVIEW_NOT_RECORDED')
+          if ('COLUMN_LEFT_STEP_NUMBER_CONFLICT' not in
+                  coverage['pages'][source_pages.index(143)]['issues']):
+              raise SystemExit('PAGE143_MISSING_NUMBER_5_NOT_FLAGGED')
+          left_phases = by_page[304]['phase_groups']['left']
+          right_phases = by_page[304]['phase_groups']['right']
+          if ([s['phase'] for s in left_phases] != ['remove', 'unassigned']
+                  or left_phases[0]['step_numbers'] != list(range(1,9))
+                  or left_phases[1]['step_numbers'] != list(range(1,8))
+                  or not left_phases[1]['review_required']
+                  or not left_phases[1]['restart_without_recognized_phase']):
+              raise SystemExit('PAGE304_MISSING_REFIT_HEADING_MUST_NOT_BE_INVENTED')
+          if ([s['phase'] for s in right_phases] != ['remove','refit']
+                  or right_phases[0]['step_numbers'] != [1,2,3]
+                  or right_phases[1]['step_numbers'] != [1,2,3,4,5]):
+              raise SystemExit('PAGE304_RIGHT_COLUMN_REMOVE_REFIT_NOT_SEPARATED')
+          if not (by_page[15]['page_visual_kind'] == 'BLANK_SCAN'
+                  and by_page[15]['ocr_skipped']
+                  and by_page[15]['baseline_ocr_words'] == 0):
+              raise SystemExit('ORIGINAL_PAGE_15_BLANK_UNRECOGNIZED')
+          if not (by_page[461]['page_visual_kind'] == 'RASTER_CONTENT'
+                  and not by_page[461]['ocr_skipped']
+                  and by_page[461]['baseline_ocr_words'] == 0):
+              raise SystemExit('ORIGINAL_PAGE_461_DIAGRAM_MISCLASSIFIED_AS_BLANK')
+
+          # The selected PDF is an isolated test corpus: its page indices
+          # 1..12 are NOT original physical page numbers 7..461.
+          sample_pack = root / 'sample-candidate.zip'
+          built = build_document_pack(
+              extracted, sample_pack, ocr_root=root / 'audit/ocr',
+              fragment_root=root / 'audit/fragments',
+          )
+          checked = inspect_document_pack(sample_pack)
+          source_audit = audit_source_pack(sample_pack)
+          if (not checked['valid'] or checked['state'] != 'CANDIDATE_NOT_VALIDATED'
+                  or not source_audit['native_source_parity_ok']):
+              raise SystemExit('SAMPLE_CANDIDATE_SQLITE_OR_SOURCE_PARITY_FAILED')
+          dbfile = root / 'inspect-candidate.sqlite'
+          with zipfile.ZipFile(sample_pack) as archive:
+              dbfile.write_bytes(archive.read('data/knowledge.sqlite'))
+              if archive.read('source/document.pdf') != extracted.read_bytes():
+                  raise SystemExit('SAMPLE_PDF_NOT_PRESERVED')
+          with sqlite3.connect(dbfile) as db:
+              item_counts = {
+                  original_page: db.execute(
+                      'SELECT COUNT(*) FROM pack_ocr_source_items '
+                      'WHERE page_id LIKE ?', (f'%:p{index}',),
+                  ).fetchone()[0]
+                  for index, original_page in enumerate(source_pages, start=1)
+              }
+              if item_counts[116] != 19 or item_counts[304] != 7:
+                  raise SystemExit('ANCHORS_NOT_RETAINED_IN_CANDIDATE_SQLITE')
+              numbered_line_counts = {
+                  original_page: db.execute(
+                      'SELECT COUNT(*) FROM pack_ocr_numbered_lines l '
+                      'JOIN pack_ocr_numbered_segments s '
+                      'ON l.segment_id=s.segment_id '
+                      'WHERE s.page_id LIKE ?', (f'%:p{index}',)
+                  ).fetchone()[0]
+                  for index, original_page in enumerate(source_pages, start=1)
+              }
+              expected_lines = {
+                  physical: sum(
+                      len(segment['step_numbers'])
+                      for groups in page['phase_groups'].values()
+                      for segment in groups
+                  ) for physical, page in by_page.items()
+              }
+              if numbered_line_counts != expected_lines:
+                  raise SystemExit('CANDIDATE_NUMBERED_LINES_NOT_ALL_INDEXED')
+              if numbered_line_counts[304] != 23:
+                  raise SystemExit('PAGE304_23_STEPS_NOT_INDIVIDUALLY_INDEXED')
+              if numbered_line_counts[182] < 90:
+                  raise SystemExit('PAGE182_NUMBERED_SOURCE_NOT_INDEXED')
+              unlabeled = db.execute(
+                  "SELECT COUNT(*) FROM pack_ocr_numbered_segments "
+                  "WHERE heading_explicit=0 "
+                  "AND (phase<>'unassigned' OR review_required<>1)"
+              ).fetchone()[0]
+              if unlabeled:
+                  raise SystemExit('UNCLASSIFIED_NUMBERS_PREMATURELY_LABELED')
+              if db.execute(
+                  'SELECT COUNT(*) FROM pack_ocr_numbered_lines '
+                  'WHERE approved_for_ai<>0'
+              ).fetchone()[0]:
+                  raise SystemExit('NUMBERED_OCR_UNVERIFIED_FACTS_APPROVED')
+              visual_status = {
+                  physical: db.execute(
+                      'SELECT v.content_kind,v.inspection_status,'
+                      'v.visual_review_required,v.approved_for_ai '
+                      'FROM pack_ocr_page_content v '
+                      'WHERE v.page_id LIKE ?', (f'%:p{index}',)
+                  ).fetchone()
+                  for index, physical in enumerate(source_pages, 1)
+              }
+              if built['manifest']['counts']['ocr_page_content'] != 12:
+                  raise SystemExit('PDF_PAGE_CONTENT_NOT_RETAINED_IN_SQLITE')
+              if visual_status[15] != (
+                  'BLANK_SCAN', 'CONFIRMED_BLANK_SCAN', 0, 0
+              ):
+                  raise SystemExit('REAL_BLANK_PAGE_MISCLASSIFIED_IN_SQLITE')
+              if visual_status[461] != (
+                  'RASTER_CONTENT', 'VISUAL_CONTENT_WITHOUT_OCR', 1, 0
+              ):
+                  raise SystemExit('REAL_DIAGRAM_WITHOUT_OCR_NOT_FLAGGED')
+              candidate_links = db.execute(
+                  'SELECT COUNT(*) FROM pack_procedure_continuation_candidates'
+              ).fetchone()[0]
+              if candidate_links != 0:
+                  raise SystemExit(
+                      'UNJUSTIFIED_MULTIPAGE_LINKS_ON_NONCONSECUTIVE_SAMPLE'
+                  )
+              if db.execute('SELECT COUNT(*) FROM structured_entities').fetchone()[0]:
+                  raise SystemExit('UNVALIDATED_FACTS_PROMOTED_TO_DATABASE')
+              if db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                  raise SystemExit('SAMPLE_SQLITE_NOT_INTEGRAL')
+          dbfile.unlink()
+          summary = {
+              'original_pages_examined': source_pages,
+              'original_pages_processed': len(source_pages),
+              'source_extraction': items,
+              'original_pdf_sha256': hashlib.sha256(original.read_bytes()).hexdigest(),
+              'sample_pdf_sha256': sha,
+              'sample_index_to_original_physical_page': {
+                  str(index): number for index,number in enumerate(source_pages,1)
+              },
+              'source_anchored_items_by_page': item_counts,
+              'numbered_lines_indexed_by_page': numbered_line_counts,
+              'numbered_source_lines_total': sum(numbered_line_counts.values()),
+              'source_segments_require_review': sum(
+                  int(segment['review_required'])
+                  for page in items
+                  for groups in page['phase_groups'].values()
+                  for segment in groups
+              ),
+              'adaptive_issues': coverage['issue_counts'],
+              'visual_source_classifications': {
+                  str(p): {
+                      'content_kind': item[0],
+                      'inspection_status': item[1],
+                      'needs_visual_review': bool(item[2]),
+                  }
+                  for p,item in visual_status.items()
+              },
+              'diagram_only_page461_preserved_for_visual_review': True,
+              'blank_page15_skipped': True,
+              'page143_missing_step_flagged': True,
+              'page304_remove_refit_isolated': True,
+              'page304_unlabeled_restart_requires_review': True,
+              'physical_page_link_guard_verified': True,
+              'cross_page_candidate_links_on_nonadjacent_sample': 0,
+              'cross_page_code_unit_tested_on_2_and_3_adjacent_pages': True,
+              'sample_candidate_pack_verified': True,
+              'original_pdf_retained_in_candidate': True,
+              'publication_authorized': False,
+          }
+          (root / 'diagnostic.json').write_text(
+              json.dumps(summary, indent=2, ensure_ascii=False),
+              encoding='utf-8')
+          print('MEMS_FORGE_12_PAGE_REGRESSION=' +
+                json.dumps(summary, ensure_ascii=False),flush=True)
+          PY
+      - name: Publier seulement le diagnostic, pas les pages PDF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mems-forge-diagnostic-sample-12-${{ github.run_id }}
+          path: out/sample-12-pages/diagnostic.json
+          if-no-files-found: warn
+          retention-days: 7

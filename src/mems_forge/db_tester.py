@@ -20,6 +20,11 @@ SEARCH_CONFIG: dict[str, tuple[str, ...]] = {
     "pack_ocr_pages": ("text",),
     "pack_ocr_variants": ("candidate_text",),
     "pack_ocr_source_items": ("source_text",),
+    "pack_ocr_numbered_lines": ("source_text",),
+    "pack_ocr_page_content": ("content_kind", "inspection_status"),
+    "pack_procedure_continuation_candidates": ("candidate_repair_number", "chapter_id"),
+    "pack_procedure_continuation_steps": ("candidate_text",),
+    "pack_source_notices": ("source_text", "notice_kind"),
 }
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "memslibrary_search": (
@@ -45,6 +50,32 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "pack_ocr_source_items": (
         "page_id", "source_number", "source_text",
         "source_bbox_pdf_json", "source_method",
+        "validation_state", "approved_for_ai",
+    ),
+    "pack_ocr_numbered_lines": (
+        "segment_id", "line_index", "step_number", "source_text",
+        "source_bbox_scope", "validation_state", "approved_for_ai",
+    ),
+    "pack_ocr_page_content": (
+        "page_id", "content_kind", "ocr_skipped",
+        "inspection_status", "visual_review_required", "approved_for_ai",
+    ),
+    "pack_procedure_continuation_candidates": (
+        "from_page_id", "to_page_id",
+        "from_original_page", "to_original_page",
+        "candidate_repair_number", "chapter_id", "to_region",
+        "step_numbers_json", "source_lines_json", "evidence_json",
+        "validation_state", "approved_for_ai",
+    ),
+    "pack_procedure_continuation_steps": (
+        "candidate_id", "step_number", "candidate_text",
+        "source_lines_json", "source_line_count",
+        "measurement_mentions_json", "validation_state", "approved_for_ai",
+    ),
+    "pack_source_notices": (
+        "page_id", "original_physical_page", "source_region",
+        "notice_kind", "source_text", "source_lines_json",
+        "source_line_count", "relationship_to_procedure",
         "validation_state", "approved_for_ai",
     ),
 }

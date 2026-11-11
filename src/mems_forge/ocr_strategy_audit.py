@@ -20,6 +20,7 @@ import pymupdf
 
 from .ocr_layout import _best_gutter
 from .ocr_reader import _parse_words
+from .structure_candidates import PHASE_LABELS
 
 _LIST_ITEM = re.compile(r"^\s*(\d{1,3})\s*[.)]\s+\w", re.MULTILINE)
 
@@ -89,6 +90,98 @@ def _recover_vertical_list_roi(words, width: int, height: int) -> list[int] | No
     if x1 <= x0 or y1 <= y0:
         return None
     return [round(x0), round(y0), round(x1), round(y1)]
+
+
+def _phase_bounded_numbered_steps(text: str) -> list[dict]:
+    """Group observed numbered OCR lines by explicit procedure phase.
+
+    `Remove` and `Refit` are different numbered sequences even when both
+    begin with 1. Unassigned lines stay visibly unassigned. This uses only
+    exact manufacturer phase headings, never inferred phase names or AI text.
+    A side/column is always analyzed independently by the calling extractor.
+    """
+    groups: list[dict] = []
+    current: dict | None = None
+    for source_line in text.splitlines():
+        value = " ".join(source_line.split())
+        if not value:
+            continue
+        phase_key = value.strip(" :.-").casefold()
+        if phase_key in PHASE_LABELS:
+            current = {
+                "phase": PHASE_LABELS[phase_key],
+                "source_phase_heading": value,
+                "source_heading_explicit": True,
+                "steps": [],
+            }
+            groups.append(current)
+            continue
+        hit = _LIST_ITEM.match(value)
+        if not hit:
+            continue
+        if current is None:
+            current = {
+                "phase": "unassigned",
+                "source_phase_heading": None,
+                "source_heading_explicit": False,
+                "steps": [],
+            }
+            groups.append(current)
+        number = int(hit.group(1))
+        if (current["steps"]
+                and number <= current["steps"][-1]["number"]):
+            # A new 1 after 8 may be Refit, another repair or an OCR
+            # duplication. Without a visible heading we must NOT guess which.
+            # Separate the sequence, preserving all original text and the
+            # evidence that the new group has an unresolved identity.
+            current = {
+                "phase": "unassigned",
+                "source_phase_heading": None,
+                "source_heading_explicit": False,
+                "restart_without_recognized_phase": True,
+                "previous_step_number": current["steps"][-1]["number"],
+                "steps": [],
+            }
+            groups.append(current)
+        current["steps"].append({
+            "number": number,
+            "source_text": value,
+            "validation_state": "OCR_NUMBERED_LINE_CANDIDATE",
+            "approved_for_ai": False,
+        })
+    for segment in groups:
+        numbers = [item["number"] for item in segment["steps"]]
+        segment["step_numbers"] = numbers
+        segment["sequence_status"] = (
+            "not_applicable" if len(numbers) < 2
+            else "contiguous" if numbers == list(range(numbers[0], numbers[0]+len(numbers)))
+            else "gaps_repeats_or_ocr_conflict"
+        )
+        # An unlabelled numerical sequence might be procedure steps, a parts
+        # legend, an illustration index, or a continuation from another page.
+        # It is NOT a technical procedure merely because its numbers are tidy.
+        segment["source_kind"] = (
+            "numbered_lines_under_explicit_phase"
+            if segment["source_heading_explicit"]
+            else "numbered_lines_unclassified"
+        )
+        segment["review_required"] = (
+            not segment["source_heading_explicit"]
+            or segment.get("restart_without_recognized_phase", False)
+            or segment["sequence_status"] == "gaps_repeats_or_ocr_conflict"
+        )
+        segment["review_reasons"] = [
+            reason for flag, reason in (
+                (not segment["source_heading_explicit"],
+                 "numbered_lines_without_explicit_phase"),
+                (segment.get("restart_without_recognized_phase", False),
+                 "restart_without_visible_phase_heading"),
+                (segment["sequence_status"] == "gaps_repeats_or_ocr_conflict",
+                 "numbering_gap_or_ocr_conflict"),
+            ) if flag
+        ]
+        segment["approved_for_technical_database"] = False
+    return [segment for segment in groups if segment["steps"]]
 
 
 def _numbered_lines(text: str) -> dict[int, str]:
@@ -296,6 +389,7 @@ def _recheck_two_column_regions(
             "text": versions[preferred]["text"],
             "numbering": versions[preferred]["numbering"],
             "versions": versions,
+            "phase_segments": _phase_bounded_numbered_steps(versions[preferred]["text"]),
             "bbox_pdf": [rect.x0, rect.y0, rect.x1, rect.y1],
             "crop_basis": "tight_original_pdf_ocr_geometry",
             "approved_for_technical_database": False,
